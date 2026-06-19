@@ -1,0 +1,10 @@
+CREATE DATABASE eprocurement_auth;
+CREATE DATABASE eprocurement_tenants;
+CREATE DATABASE eprocurement_vendors;
+CREATE DATABASE eprocurement_procurement;
+CREATE DATABASE eprocurement_tenders;
+CREATE DATABASE eprocurement_bidding;
+CREATE DATABASE eprocurement_contracts;
+CREATE DATABASE eprocurement_documents;
+CREATE DATABASE eprocurement_audit;
+CREATE DATABASE eprocurement_notifications;

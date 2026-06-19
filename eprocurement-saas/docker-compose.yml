@@ -1,0 +1,287 @@
+x-service-env: &service-env
+  ASPNETCORE_ENVIRONMENT: Development
+  Jwt__Issuer: ${JWT_ISSUER:-eprocurement}
+  Jwt__Audience: ${JWT_AUDIENCE:-eprocurement-web}
+  Jwt__Secret: ${JWT_SECRET:-development-secret-change-me-development-secret}
+  Services__Audit: http://audit-service:8080
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: eprocurement-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-eprocurement}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: eprocurement-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@demo.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-Password123!}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  minio:
+    image: minio/minio:latest
+    container_name: eprocurement-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: eprocurement-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: eprocurement-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.AuthService/Dockerfile
+    container_name: eprocurement-auth-service
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_auth;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      Jwt__Issuer: ${JWT_ISSUER:-eprocurement}
+      Jwt__Audience: ${JWT_AUDIENCE:-eprocurement-web}
+      Jwt__Secret: ${JWT_SECRET:-development-secret-change-me-development-secret}
+      Frontend__Url: ${FRONTEND_URL:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5101:8080"
+
+  tenant-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.TenantService/Dockerfile
+    container_name: eprocurement-tenant-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_tenants;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      Frontend__Url: ${FRONTEND_URL:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5102:8080"
+
+  vendor-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.VendorService/Dockerfile
+    container_name: eprocurement-vendor-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5103:8080"
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_vendors;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+
+  procurement-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.ProcurementService/Dockerfile
+    container_name: eprocurement-procurement-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_procurement;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5104:8080"
+
+  tender-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.TenderService/Dockerfile
+    container_name: eprocurement-tender-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_tenders;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5105:8080"
+
+  bidding-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.BiddingService/Dockerfile
+    container_name: eprocurement-bidding-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_bidding;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5106:8080"
+
+  contract-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.ContractService/Dockerfile
+    container_name: eprocurement-contract-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_contracts;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5107:8080"
+
+  document-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.DocumentService/Dockerfile
+    container_name: eprocurement-document-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_documents;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5108:8080"
+
+  audit-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.AuditService/Dockerfile
+    container_name: eprocurement-audit-service
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_audit;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      Jwt__Issuer: ${JWT_ISSUER:-eprocurement}
+      Jwt__Audience: ${JWT_AUDIENCE:-eprocurement-web}
+      Jwt__Secret: ${JWT_SECRET:-development-secret-change-me-development-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5109:8080"
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.NotificationService/Dockerfile
+    container_name: eprocurement-notification-service
+    environment:
+      <<: *service-env
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=eprocurement_notifications;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    ports:
+      - "5110:8080"
+
+  sap-integration-service:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.SapIntegrationService/Dockerfile
+    container_name: eprocurement-sap-integration-service
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Jwt__Issuer: ${JWT_ISSUER:-eprocurement}
+      Jwt__Audience: ${JWT_AUDIENCE:-eprocurement-web}
+      Jwt__Secret: ${JWT_SECRET:-development-secret-change-me-development-secret}
+    ports:
+      - "5111:8080"
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: backend/EProcurement.ApiGateway/Dockerfile
+    container_name: eprocurement-api-gateway
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Frontend__Url: ${FRONTEND_URL:-http://localhost:3000}
+    depends_on:
+      - auth-service
+      - tenant-service
+      - vendor-service
+      - procurement-service
+      - tender-service
+      - bidding-service
+      - contract-service
+      - document-service
+      - audit-service
+      - notification-service
+      - sap-integration-service
+    ports:
+      - "8088:8080"
+
+  frontend:
+    build:
+      context: ./frontend/eprocurement-web
+      dockerfile: Dockerfile
+    container_name: eprocurement-web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8088}
+    depends_on:
+      - api-gateway
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  minio_data:
+  rabbitmq_data:
+  pgadmin_data:
