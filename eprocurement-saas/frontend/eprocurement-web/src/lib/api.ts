@@ -19,6 +19,8 @@ export type LoginResponse = {
 export type PurchaseRequest = {
   id: string;
   tenantId: string;
+  docEntry: number;
+  docNum: string;
   title: string;
   department: string;
   costCenter?: string;

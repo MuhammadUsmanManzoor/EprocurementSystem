@@ -221,7 +221,9 @@ export function MvpFlowPage({ mode, id }: { mode: Mode; id?: string }) {
         <DataTable
           data={state.prs.map((item) => ({ ...item, amount: item.items.reduce((sum, line) => sum + line.quantity * line.estimatedUnitPrice, 0) }))}
           columns={[
-            { key: "title", label: "Title", render: (item) => <Link className="font-medium text-brand" href={`/dashboard/purchase-requests/${item.id}`}>{String(item.title)}</Link> },
+            { key: "docNum", label: "Doc Num", render: (item) => <Link className="font-semibold text-brand" href={`/dashboard/purchase-requests/${item.id}`}>{String(item.docNum || "-")}</Link> },
+            { key: "docEntry", label: "Doc Entry", render: (item) => String(item.docEntry || "-") },
+            { key: "title", label: "Title", render: (item) => <Link className="block max-w-xl truncate font-medium text-brand" title={String(item.title)} href={`/dashboard/purchase-requests/${item.id}`}>{String(item.title)}</Link> },
             { key: "department", label: "Department" },
             { key: "costCenter", label: "Cost Center", render: (item) => String(item.costCenter ?? "-") },
             { key: "category", label: "Category", render: (item) => String(item.category ?? "-") },
@@ -282,6 +284,7 @@ export function MvpFlowPage({ mode, id }: { mode: Mode; id?: string }) {
           data={state.prs.filter((item) => item.status === "Submitted" || item.status === "Approved")}
           columns={[
             { key: "title", label: "Title" },
+            { key: "docNum", label: "Doc Num", render: (item) => String(item.docNum || "-") },
             { key: "department", label: "Department" },
             { key: "status", label: "Status", render: (item) => <StatusBadge status={String(item.status)} /> },
             { key: "id", label: "Action", render: (item) => String(item.status) === "Submitted" ? <Button disabled={busy} onClick={() => runAction("Purchase request approved", () => api.purchaseRequests.approve(String(item.id), true, "Approved for tender creation."))}>Approve</Button> : <span className="text-slate-500">Approved</span> }
@@ -516,7 +519,7 @@ function PrDetail({ pr, busy, onSubmit, documentTypes }: { pr: PurchaseRequest; 
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-ink">{pr.title}</h2>
-              <p className="text-sm text-slate-600">{pr.department} - {formatCurrency(amount)}</p>
+              <p className="text-sm text-slate-600">{pr.docNum} / DocEntry {pr.docEntry} - {pr.department} - {formatCurrency(amount)}</p>
             </div>
             <StatusBadge status={pr.status} />
           </div>

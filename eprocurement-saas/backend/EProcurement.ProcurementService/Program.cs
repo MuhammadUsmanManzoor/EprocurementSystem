@@ -63,9 +63,12 @@ group.MapPost("/", async (CreatePurchaseRequest request, ProcurementDbContext db
         return Results.BadRequest("TenantId is required.");
     }
 
+    var nextDocEntry = await GetNextDocEntryAsync(db, tenantId);
     var pr = new PurchaseRequest
     {
         TenantId = tenantId,
+        DocEntry = nextDocEntry,
+        DocNum = BuildDocNum(nextDocEntry),
         Title = request.Title.Trim(),
         Department = request.Department.Trim(),
         CostCenter = request.CostCenter?.Trim(),
@@ -142,14 +145,41 @@ static async Task AuditAsync(IHttpClientFactory factory, Guid tenantId, string a
     try { await factory.CreateClient("audit").PostAsJsonAsync("/api/audit-logs", new AuditEventRequest(tenantId, "ProcurementService", action, entity, entityId, actor, details)); } catch { }
 }
 
+static async Task<int> GetNextDocEntryAsync(ProcurementDbContext db, Guid tenantId)
+{
+    var maxDocEntry = await db.PurchaseRequests
+        .Where(pr => pr.TenantId == tenantId)
+        .MaxAsync(pr => (int?)pr.DocEntry) ?? 0;
+    return maxDocEntry + 1;
+}
+
+static string BuildDocNum(int docEntry) => $"PR-{DateTime.UtcNow:yyyy}-{docEntry:000000}";
+
 static async Task EnsureSchemaAsync(ProcurementDbContext db)
 {
     await db.Database.ExecuteSqlRawAsync("""
+        ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "DocEntry" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "DocNum" character varying(40) NOT NULL DEFAULT '';
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "CostCenter" character varying(120) NULL;
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "Category" character varying(120) NULL;
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "Currency" character varying(16) NOT NULL DEFAULT 'USD';
         ALTER TABLE "PurchaseRequestItems" ADD COLUMN IF NOT EXISTS "ItemCode" character varying(120) NULL;
         ALTER TABLE "PurchaseRequestItems" ADD COLUMN IF NOT EXISTS "UnitOfMeasure" character varying(40) NULL;
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
+        WITH numbered AS (
+            SELECT "Id", ROW_NUMBER() OVER (PARTITION BY "TenantId" ORDER BY "CreatedAtUtc", "Id")::integer AS rn
+            FROM "PurchaseRequests"
+            WHERE "DocEntry" = 0 OR "DocNum" = ''
+        )
+        UPDATE "PurchaseRequests" pr
+        SET "DocEntry" = numbered.rn,
+            "DocNum" = 'PR-' || EXTRACT(YEAR FROM pr."CreatedAtUtc")::integer || '-' || LPAD(numbered.rn::text, 6, '0')
+        FROM numbered
+        WHERE pr."Id" = numbered."Id";
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_PurchaseRequests_TenantId_DocEntry" ON "PurchaseRequests" ("TenantId", "DocEntry");
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_PurchaseRequests_TenantId_DocNum" ON "PurchaseRequests" ("TenantId", "DocNum");
         """);
 }
 
@@ -164,6 +194,8 @@ static async Task SeedDemoDataAsync(ProcurementDbContext db)
     {
         Id = DemoDataIds.ApprovedPurchaseRequestId,
         TenantId = DemoDataIds.TenantId,
+        DocEntry = 1,
+        DocNum = "PR-2026-000001",
         Title = "Laptop Refresh for Procurement Team",
         Department = "Procurement",
         CostCenter = "CC-PROC-001",
@@ -195,6 +227,8 @@ static async Task SeedDemoDataAsync(ProcurementDbContext db)
 
 public sealed class PurchaseRequest : TenantEntity
 {
+    public int DocEntry { get; set; }
+    public string DocNum { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string Department { get; set; } = string.Empty;
     public string? CostCenter { get; set; }
@@ -235,6 +269,9 @@ public sealed class ProcurementDbContext : DbContext
         modelBuilder.Entity<PurchaseRequest>(entity =>
         {
             entity.HasKey(pr => pr.Id);
+            entity.HasIndex(pr => new { pr.TenantId, pr.DocEntry }).IsUnique();
+            entity.HasIndex(pr => new { pr.TenantId, pr.DocNum }).IsUnique();
+            entity.Property(pr => pr.DocNum).HasMaxLength(40).IsRequired();
             entity.Property(pr => pr.Title).HasMaxLength(200).IsRequired();
             entity.Property(pr => pr.Department).HasMaxLength(120).IsRequired();
             entity.Property(pr => pr.CostCenter).HasMaxLength(120);
