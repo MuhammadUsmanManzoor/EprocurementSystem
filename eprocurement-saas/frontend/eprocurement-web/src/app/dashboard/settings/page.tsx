@@ -1,5 +1,5 @@
-import { MasterDataPage } from "@/components/pages/MasterDataPage";
+import { AdminSettingsPage } from "@/components/pages/AdminSettingsPage";
 
 export default function SettingsPage() {
-  return <MasterDataPage />;
+  return <AdminSettingsPage />;
 }

@@ -165,6 +165,45 @@ export type MasterDataItem = {
   isActive: boolean;
 };
 
+export type UserAdmin = {
+  id: string;
+  tenantId: string | null;
+  email: string;
+  fullName: string;
+  role: string;
+  isActive: boolean;
+  createdAtUtc: string;
+};
+
+export type RolePermission = {
+  id: string;
+  module: string;
+  scenario: string;
+  canView: boolean;
+  canCreate: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canOpen: boolean;
+  canEvaluate: boolean;
+  canAward: boolean;
+  canGenerate: boolean;
+  canExport: boolean;
+  canAudit: boolean;
+};
+
+export type RoleAdmin = {
+  id: string;
+  tenantId: string | null;
+  code: string;
+  name: string;
+  description: string;
+  isSystem: boolean;
+  isActive: boolean;
+  permissions: RolePermission[];
+};
+
 export type DocumentVersion = {
   id: string;
   tenantId: string;
@@ -312,6 +351,20 @@ export const api = {
     update: (id: string, payload: { code: string; name: string; description?: string; isActive: boolean }) =>
       apiRequest<MasterDataItem>(`/master-data/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
     remove: (id: string) => apiRequest<void>(`/master-data/${id}`, { method: "DELETE" })
+  },
+  users: {
+    list: () => apiRequest<UserAdmin[]>("/users"),
+    create: (payload: { tenantId?: string; email: string; fullName: string; role: string; password?: string }) =>
+      apiRequest<UserAdmin>("/users", { method: "POST", body: JSON.stringify(payload) }),
+    update: (id: string, payload: { tenantId?: string | null; fullName: string; role: string; isActive: boolean; password?: string }) =>
+      apiRequest<UserAdmin>(`/users/${id}`, { method: "PUT", body: JSON.stringify(payload) })
+  },
+  roles: {
+    list: () => apiRequest<RoleAdmin[]>("/roles"),
+    create: (payload: { tenantId?: string; code: string; name: string; description?: string; permissions: RolePermission[] }) =>
+      apiRequest<RoleAdmin>("/roles", { method: "POST", body: JSON.stringify(payload) }),
+    update: (id: string, payload: { name: string; description?: string; isActive: boolean; permissions: RolePermission[] }) =>
+      apiRequest<RoleAdmin>(`/roles/${id}`, { method: "PUT", body: JSON.stringify(payload) })
   },
   documents: {
     list: (filters?: { entityName?: string; entityId?: string }) => {
