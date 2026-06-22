@@ -36,7 +36,11 @@ var group = app.MapGroup("/api/purchase-requests").RequireAuthorization();
 group.MapGet("/", async (ProcurementDbContext db, HttpContext http) =>
 {
     var user = new CurrentUser(http.User);
-    var query = db.PurchaseRequests.Include(pr => pr.Items).AsQueryable();
+    var query = db.PurchaseRequests
+        .Include(pr => pr.Items)
+        .Include(pr => pr.ApprovalStages)
+        .ThenInclude(stage => stage.Approvers)
+        .AsQueryable();
     if (!user.IsSuperAdmin)
     {
         query = query.Where(pr => pr.TenantId == user.RequireTenantId());
@@ -48,7 +52,11 @@ group.MapGet("/", async (ProcurementDbContext db, HttpContext http) =>
 group.MapGet("/{id:guid}", async (Guid id, ProcurementDbContext db, HttpContext http) =>
 {
     var user = new CurrentUser(http.User);
-    var pr = await db.PurchaseRequests.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == id);
+    var pr = await db.PurchaseRequests
+        .Include(x => x.Items)
+        .Include(pr => pr.ApprovalStages)
+        .ThenInclude(stage => stage.Approvers)
+        .SingleOrDefaultAsync(x => x.Id == id);
     if (pr is null) return Results.NotFound();
     if (!user.CanAccessTenant(pr.TenantId)) return Results.Forbid();
     return Results.Ok(pr);
@@ -97,12 +105,17 @@ group.MapPost("/", async (CreatePurchaseRequest request, ProcurementDbContext db
 group.MapPost("/{id:guid}/submit", async (Guid id, ProcurementDbContext db, IHttpClientFactory httpClientFactory, HttpContext http) =>
 {
     var user = new CurrentUser(http.User);
-    var pr = await db.PurchaseRequests.FindAsync(id);
+    var pr = await db.PurchaseRequests
+        .Include(x => x.ApprovalStages)
+        .ThenInclude(stage => stage.Approvers)
+        .SingleOrDefaultAsync(x => x.Id == id);
     if (pr is null) return Results.NotFound();
     if (!user.CanAccessTenant(pr.TenantId)) return Results.Forbid();
     if (pr.Status != PurchaseRequestStatus.Draft) return Results.BadRequest("Only draft purchase requests can be submitted.");
 
     pr.Status = PurchaseRequestStatus.Submitted;
+    await EnsureApprovalWorkflowAsync(db, pr);
+    SetCurrentApprovalStage(pr);
     pr.SubmittedAtUtc = DateTime.UtcNow;
     pr.UpdatedAtUtc = DateTime.UtcNow;
     await db.SaveChangesAsync();
@@ -113,20 +126,76 @@ group.MapPost("/{id:guid}/submit", async (Guid id, ProcurementDbContext db, IHtt
 group.MapPost("/{id:guid}/approve", async (Guid id, ApprovePurchaseRequest request, ProcurementDbContext db, IHttpClientFactory httpClientFactory, HttpContext http) =>
 {
     var user = new CurrentUser(http.User);
-    if (!user.IsSuperAdmin && user.Role != "Approver" && !user.IsTenantAdmin) return Results.Forbid();
 
-    var pr = await db.PurchaseRequests.FindAsync(id);
+    var pr = await db.PurchaseRequests
+        .Include(x => x.ApprovalStages)
+        .ThenInclude(stage => stage.Approvers)
+        .SingleOrDefaultAsync(x => x.Id == id);
     if (pr is null) return Results.NotFound();
     if (!user.CanAccessTenant(pr.TenantId)) return Results.Forbid();
     if (pr.Status != PurchaseRequestStatus.Submitted) return Results.BadRequest("Only submitted purchase requests can be approved or rejected.");
 
-    pr.Status = request.Approved ? PurchaseRequestStatus.Approved : PurchaseRequestStatus.Rejected;
+    await EnsureApprovalWorkflowAsync(db, pr);
+    var currentStage = GetCurrentApprovalStage(pr);
+    if (currentStage is null) return Results.BadRequest("No pending approval stage was found.");
+
+    var assignedApprover = currentStage.Approvers
+        .FirstOrDefault(approver => approver.ApproverEmail.Equals(user.Email, StringComparison.OrdinalIgnoreCase));
+    if (!user.IsSuperAdmin && !user.IsTenantAdmin && assignedApprover is null)
+    {
+        return Results.Forbid();
+    }
+
     pr.ApprovalRemarks = request.Remarks.Trim();
-    pr.ApprovedByEmail = user.Email;
-    pr.ApprovedAtUtc = DateTime.UtcNow;
     pr.UpdatedAtUtc = DateTime.UtcNow;
+
+    if (!request.Approved)
+    {
+        pr.Status = PurchaseRequestStatus.Rejected;
+        currentStage.Status = ApprovalStageStatus.Rejected;
+        currentStage.ActionedByEmail = user.Email;
+        currentStage.ActionedAtUtc = DateTime.UtcNow;
+        currentStage.Remarks = request.Remarks.Trim();
+        if (assignedApprover is not null)
+        {
+            assignedApprover.Status = ApprovalApproverStatus.Rejected;
+            assignedApprover.ActionedAtUtc = DateTime.UtcNow;
+            assignedApprover.Remarks = request.Remarks.Trim();
+        }
+
+        await db.SaveChangesAsync();
+        await AuditAsync(httpClientFactory, pr.TenantId, "PurchaseRequestRejected", "PurchaseRequest", pr.Id, user.Email, $"{currentStage.StageName}: {request.Remarks}");
+        return Results.Ok(pr);
+    }
+
+    currentStage.Status = ApprovalStageStatus.Approved;
+    currentStage.ActionedByEmail = user.Email;
+    currentStage.ActionedAtUtc = DateTime.UtcNow;
+    currentStage.Remarks = request.Remarks.Trim();
+    if (assignedApprover is not null)
+    {
+        assignedApprover.Status = ApprovalApproverStatus.Approved;
+        assignedApprover.ActionedAtUtc = DateTime.UtcNow;
+        assignedApprover.Remarks = request.Remarks.Trim();
+    }
+
+    var nextStage = GetCurrentApprovalStage(pr);
+    if (nextStage is null)
+    {
+        pr.Status = PurchaseRequestStatus.Approved;
+        pr.ApprovedByEmail = user.Email;
+        pr.ApprovedAtUtc = DateTime.UtcNow;
+        pr.CurrentApprovalStageOrder = null;
+        pr.CurrentApprovalStageName = null;
+    }
+    else
+    {
+        pr.CurrentApprovalStageOrder = nextStage.StageOrder;
+        pr.CurrentApprovalStageName = nextStage.StageName;
+    }
+
     await db.SaveChangesAsync();
-    await AuditAsync(httpClientFactory, pr.TenantId, request.Approved ? "PurchaseRequestApproved" : "PurchaseRequestRejected", "PurchaseRequest", pr.Id, user.Email, request.Remarks);
+    await AuditAsync(httpClientFactory, pr.TenantId, pr.Status == PurchaseRequestStatus.Approved ? "PurchaseRequestApproved" : "PurchaseRequestApprovalStageApproved", "PurchaseRequest", pr.Id, user.Email, $"{currentStage.StageName}: {request.Remarks}");
     return Results.Ok(pr);
 });
 
@@ -155,6 +224,72 @@ static async Task<int> GetNextDocEntryAsync(ProcurementDbContext db, Guid tenant
 
 static string BuildDocNum(int docEntry) => $"PR-{DateTime.UtcNow:yyyy}-{docEntry:000000}";
 
+static Task EnsureApprovalWorkflowAsync(ProcurementDbContext db, PurchaseRequest pr)
+{
+    if (pr.ApprovalStages.Any())
+    {
+        return Task.CompletedTask;
+    }
+
+    var stages = new[]
+    {
+        CreateApprovalStage(pr, 1, "Stage 1 - Department Approval", new[] { "approver@akpk.com" }),
+        CreateApprovalStage(pr, 2, "Stage 2 - Finance and Procurement Review", new[] { "finance@akpk.com", "procurement@akpk.com", "tenantadmin@akpk.com" }),
+        CreateApprovalStage(pr, 3, "Stage 3 - Final Approval", new[] { "tenantadmin@akpk.com", "approver@akpk.com" })
+    };
+
+    foreach (var stage in stages)
+    {
+        pr.ApprovalStages.Add(stage);
+        db.Entry(stage).State = EntityState.Added;
+        foreach (var approver in stage.Approvers)
+        {
+            db.Entry(approver).State = EntityState.Added;
+        }
+    }
+
+    SetCurrentApprovalStage(pr);
+    return Task.CompletedTask;
+}
+
+static PurchaseRequestApprovalStage CreateApprovalStage(PurchaseRequest pr, int stageOrder, string stageName, IEnumerable<string> approverEmails)
+{
+    var stage = new PurchaseRequestApprovalStage
+    {
+        TenantId = pr.TenantId,
+        PurchaseRequestId = pr.Id,
+        StageOrder = stageOrder,
+        StageName = stageName,
+        ApprovalMode = ApprovalStageMode.AnyOne,
+        Status = ApprovalStageStatus.Pending
+    };
+
+    stage.Approvers = approverEmails.Select(email => new PurchaseRequestApprovalStageApprover
+    {
+        TenantId = pr.TenantId,
+        ApprovalStageId = stage.Id,
+        ApproverEmail = email,
+        Status = ApprovalApproverStatus.Pending
+    }).ToList();
+
+    return stage;
+}
+
+static PurchaseRequestApprovalStage? GetCurrentApprovalStage(PurchaseRequest pr)
+{
+    return pr.ApprovalStages
+        .Where(stage => stage.Status == ApprovalStageStatus.Pending)
+        .OrderBy(stage => stage.StageOrder)
+        .FirstOrDefault();
+}
+
+static void SetCurrentApprovalStage(PurchaseRequest pr)
+{
+    var stage = GetCurrentApprovalStage(pr);
+    pr.CurrentApprovalStageOrder = stage?.StageOrder;
+    pr.CurrentApprovalStageName = stage?.StageName;
+}
+
 static async Task EnsureSchemaAsync(ProcurementDbContext db)
 {
     await db.Database.ExecuteSqlRawAsync("""
@@ -163,8 +298,46 @@ static async Task EnsureSchemaAsync(ProcurementDbContext db)
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "CostCenter" character varying(120) NULL;
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "Category" character varying(120) NULL;
         ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "Currency" character varying(16) NOT NULL DEFAULT 'USD';
+        ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "CurrentApprovalStageOrder" integer NULL;
+        ALTER TABLE "PurchaseRequests" ADD COLUMN IF NOT EXISTS "CurrentApprovalStageName" character varying(160) NULL;
         ALTER TABLE "PurchaseRequestItems" ADD COLUMN IF NOT EXISTS "ItemCode" character varying(120) NULL;
         ALTER TABLE "PurchaseRequestItems" ADD COLUMN IF NOT EXISTS "UnitOfMeasure" character varying(40) NULL;
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "PurchaseRequestApprovalStages" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "PurchaseRequestId" uuid NOT NULL,
+            "StageOrder" integer NOT NULL,
+            "StageName" character varying(160) NOT NULL,
+            "ApprovalMode" character varying(32) NOT NULL,
+            "Status" character varying(32) NOT NULL,
+            "ActionedByEmail" character varying(180) NULL,
+            "ActionedAtUtc" timestamp with time zone NULL,
+            "Remarks" character varying(500) NULL,
+            "CreatedAtUtc" timestamp with time zone NOT NULL,
+            "UpdatedAtUtc" timestamp with time zone NULL,
+            CONSTRAINT "PK_PurchaseRequestApprovalStages" PRIMARY KEY ("Id")
+        );
+
+        CREATE TABLE IF NOT EXISTS "PurchaseRequestApprovalStageApprovers" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "ApprovalStageId" uuid NOT NULL,
+            "ApproverEmail" character varying(180) NOT NULL,
+            "Status" character varying(32) NOT NULL,
+            "ActionedAtUtc" timestamp with time zone NULL,
+            "Remarks" character varying(500) NULL,
+            "CreatedAtUtc" timestamp with time zone NOT NULL,
+            "UpdatedAtUtc" timestamp with time zone NULL,
+            CONSTRAINT "PK_PurchaseRequestApprovalStageApprovers" PRIMARY KEY ("Id")
+        );
+
+        CREATE INDEX IF NOT EXISTS "IX_PurchaseRequestApprovalStages_PurchaseRequestId_StageOrder"
+            ON "PurchaseRequestApprovalStages" ("PurchaseRequestId", "StageOrder");
+        CREATE INDEX IF NOT EXISTS "IX_PurchaseRequestApprovalStageApprovers_ApprovalStageId"
+            ON "PurchaseRequestApprovalStageApprovers" ("ApprovalStageId");
         """);
 
     await db.Database.ExecuteSqlRawAsync("""
@@ -241,7 +414,10 @@ public sealed class PurchaseRequest : TenantEntity
     public string? ApprovalRemarks { get; set; }
     public DateTime? SubmittedAtUtc { get; set; }
     public DateTime? ApprovedAtUtc { get; set; }
+    public int? CurrentApprovalStageOrder { get; set; }
+    public string? CurrentApprovalStageName { get; set; }
     public List<PurchaseRequestItem> Items { get; set; } = new();
+    public List<PurchaseRequestApprovalStage> ApprovalStages { get; set; } = new();
 }
 
 public sealed class PurchaseRequestItem : TenantEntity
@@ -255,6 +431,33 @@ public sealed class PurchaseRequestItem : TenantEntity
 }
 
 public enum PurchaseRequestStatus { Draft, Submitted, Approved, Rejected, ConvertedToTender }
+
+public sealed class PurchaseRequestApprovalStage : TenantEntity
+{
+    public Guid PurchaseRequestId { get; set; }
+    public int StageOrder { get; set; }
+    public string StageName { get; set; } = string.Empty;
+    public ApprovalStageMode ApprovalMode { get; set; } = ApprovalStageMode.AnyOne;
+    public ApprovalStageStatus Status { get; set; } = ApprovalStageStatus.Pending;
+    public string? ActionedByEmail { get; set; }
+    public DateTime? ActionedAtUtc { get; set; }
+    public string? Remarks { get; set; }
+    public List<PurchaseRequestApprovalStageApprover> Approvers { get; set; } = new();
+}
+
+public sealed class PurchaseRequestApprovalStageApprover : TenantEntity
+{
+    public Guid ApprovalStageId { get; set; }
+    public string ApproverEmail { get; set; } = string.Empty;
+    public ApprovalApproverStatus Status { get; set; } = ApprovalApproverStatus.Pending;
+    public DateTime? ActionedAtUtc { get; set; }
+    public string? Remarks { get; set; }
+}
+
+public enum ApprovalStageMode { AnyOne }
+public enum ApprovalStageStatus { Pending, Approved, Rejected }
+public enum ApprovalApproverStatus { Pending, Approved, Rejected }
+
 public sealed record CreatePurchaseRequest(Guid TenantId, string Title, string Department, string? CostCenter, string? Category, string? Currency, string Justification, List<CreatePurchaseRequestItem> Items);
 public sealed record CreatePurchaseRequestItem(string? ItemCode, string Description, string? UnitOfMeasure, decimal Quantity, decimal EstimatedUnitPrice);
 public sealed record ApprovePurchaseRequest(bool Approved, string Remarks);
@@ -264,6 +467,8 @@ public sealed class ProcurementDbContext : DbContext
     public ProcurementDbContext(DbContextOptions<ProcurementDbContext> options) : base(options) { }
     public DbSet<PurchaseRequest> PurchaseRequests => Set<PurchaseRequest>();
     public DbSet<PurchaseRequestItem> PurchaseRequestItems => Set<PurchaseRequestItem>();
+    public DbSet<PurchaseRequestApprovalStage> PurchaseRequestApprovalStages => Set<PurchaseRequestApprovalStage>();
+    public DbSet<PurchaseRequestApprovalStageApprover> PurchaseRequestApprovalStageApprovers => Set<PurchaseRequestApprovalStageApprover>();
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<PurchaseRequest>(entity =>
@@ -277,8 +482,10 @@ public sealed class ProcurementDbContext : DbContext
             entity.Property(pr => pr.CostCenter).HasMaxLength(120);
             entity.Property(pr => pr.Category).HasMaxLength(120);
             entity.Property(pr => pr.Currency).HasMaxLength(16).IsRequired();
+            entity.Property(pr => pr.CurrentApprovalStageName).HasMaxLength(160);
             entity.Property(pr => pr.Status).HasConversion<string>().HasMaxLength(32);
             entity.HasMany(pr => pr.Items).WithOne().HasForeignKey(item => item.PurchaseRequestId);
+            entity.HasMany(pr => pr.ApprovalStages).WithOne().HasForeignKey(stage => stage.PurchaseRequestId);
         });
         modelBuilder.Entity<PurchaseRequestItem>(entity =>
         {
@@ -288,6 +495,25 @@ public sealed class ProcurementDbContext : DbContext
             entity.Property(item => item.UnitOfMeasure).HasMaxLength(40);
             entity.Property(item => item.Quantity).HasPrecision(18, 2);
             entity.Property(item => item.EstimatedUnitPrice).HasPrecision(18, 2);
+        });
+        modelBuilder.Entity<PurchaseRequestApprovalStage>(entity =>
+        {
+            entity.HasKey(stage => stage.Id);
+            entity.HasIndex(stage => new { stage.PurchaseRequestId, stage.StageOrder });
+            entity.Property(stage => stage.StageName).HasMaxLength(160).IsRequired();
+            entity.Property(stage => stage.ApprovalMode).HasConversion<string>().HasMaxLength(32);
+            entity.Property(stage => stage.Status).HasConversion<string>().HasMaxLength(32);
+            entity.Property(stage => stage.ActionedByEmail).HasMaxLength(180);
+            entity.Property(stage => stage.Remarks).HasMaxLength(500);
+            entity.HasMany(stage => stage.Approvers).WithOne().HasForeignKey(approver => approver.ApprovalStageId);
+        });
+        modelBuilder.Entity<PurchaseRequestApprovalStageApprover>(entity =>
+        {
+            entity.HasKey(approver => approver.Id);
+            entity.HasIndex(approver => approver.ApprovalStageId);
+            entity.Property(approver => approver.ApproverEmail).HasMaxLength(180).IsRequired();
+            entity.Property(approver => approver.Status).HasConversion<string>().HasMaxLength(32);
+            entity.Property(approver => approver.Remarks).HasMaxLength(500);
         });
     }
 }

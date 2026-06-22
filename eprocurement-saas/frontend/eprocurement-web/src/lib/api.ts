@@ -31,8 +31,35 @@ export type PurchaseRequest = {
   status: string;
   approvalRemarks?: string;
   approvedByEmail?: string;
+  currentApprovalStageOrder?: number;
+  currentApprovalStageName?: string;
   createdAtUtc: string;
   items: Array<{ id: string; itemCode?: string; description: string; unitOfMeasure?: string; quantity: number; estimatedUnitPrice: number }>;
+  approvalStages?: ApprovalStage[];
+};
+
+export type ApprovalStage = {
+  id: string;
+  tenantId: string;
+  purchaseRequestId: string;
+  stageOrder: number;
+  stageName: string;
+  approvalMode: string;
+  status: string;
+  actionedByEmail?: string;
+  actionedAtUtc?: string;
+  remarks?: string;
+  approvers: ApprovalStageApprover[];
+};
+
+export type ApprovalStageApprover = {
+  id: string;
+  tenantId: string;
+  approvalStageId: string;
+  approverEmail: string;
+  status: string;
+  actionedAtUtc?: string;
+  remarks?: string;
 };
 
 export type Tender = {

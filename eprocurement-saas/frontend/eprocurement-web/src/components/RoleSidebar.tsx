@@ -35,7 +35,7 @@ const items: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ["*"] },
   { label: "Vendor Portal", href: "/dashboard/vendor-portal", icon: Store, roles: ["Vendor", "VendorUser"] },
   { label: "Purchase Requests", href: "/dashboard/purchase-requests", icon: ClipboardList, roles: ["TenantAdmin", "Procurement", "Approver", "Auditor"] },
-  { label: "PR Approval", href: "/dashboard/pr-approval", icon: BadgeCheck, roles: ["TenantAdmin", "Approver", "Auditor"] },
+  { label: "PR Approval", href: "/dashboard/pr-approval", icon: BadgeCheck, roles: ["TenantAdmin", "Approver", "Procurement", "Finance", "Auditor"] },
   { label: "Tenders", href: "/dashboard/tenders", icon: FileText, roles: ["TenantAdmin", "Procurement", "Committee", "EvaluationCommittee", "Vendor", "Auditor"] },
   { label: "My Bids", href: "/dashboard/my-bids", icon: Gavel, roles: ["Vendor", "VendorUser"] },
   { label: "Bid Opening", href: "/dashboard/bid-opening", icon: FileCheck2, roles: ["SuperAdmin", "Committee", "EvaluationCommittee"] },

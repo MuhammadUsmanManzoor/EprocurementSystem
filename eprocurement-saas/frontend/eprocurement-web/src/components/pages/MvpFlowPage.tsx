@@ -17,6 +17,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Textarea } from "@/components/ui/Textarea";
 import { useToast } from "@/components/ui/ToastProvider";
 import { DocumentPanel } from "@/components/documents/DocumentPanel";
+import { getCurrentUser } from "@/lib/session";
 
 type Mode =
   | "purchase-requests"
@@ -98,6 +99,7 @@ export function MvpFlowPage({ mode, id }: { mode: Mode; id?: string }) {
   const tender = useMemo(() => state.tenders.find((item) => item.id === (id ?? selectedTenderId)) ?? state.tenders[0], [id, selectedTenderId, state.tenders]);
   const pr = useMemo(() => state.prs.find((item) => item.id === id) ?? state.prs[0], [id, state.prs]);
   const po = useMemo(() => state.purchaseOrders.find((item) => item.id === id) ?? state.purchaseOrders.find((item) => item.id === selectedPoId) ?? state.purchaseOrders[0], [id, selectedPoId, state.purchaseOrders]);
+  const currentUser = useMemo(() => getCurrentUser(), []);
   const master = (type: string) => state.masterData.filter((item) => item.type === type && item.isActive);
 
   async function load() {
@@ -283,11 +285,22 @@ export function MvpFlowPage({ mode, id }: { mode: Mode; id?: string }) {
         <DataTable
           data={state.prs.filter((item) => item.status === "Submitted" || item.status === "Approved")}
           columns={[
-            { key: "title", label: "Title" },
             { key: "docNum", label: "Doc Num", render: (item) => String(item.docNum || "-") },
+            { key: "title", label: "Title" },
             { key: "department", label: "Department" },
+            { key: "currentApprovalStageName", label: "Current Stage", render: (item) => String(item.currentApprovalStageName ?? "Completed") },
+            { key: "approvalStages", label: "Assigned Approvers", render: (item) => <ApproverList pr={item as PurchaseRequest} /> },
             { key: "status", label: "Status", render: (item) => <StatusBadge status={String(item.status)} /> },
-            { key: "id", label: "Action", render: (item) => String(item.status) === "Submitted" ? <Button disabled={busy} onClick={() => runAction("Purchase request approved", () => api.purchaseRequests.approve(String(item.id), true, "Approved for tender creation."))}>Approve</Button> : <span className="text-slate-500">Approved</span> }
+            { key: "id", label: "Action", render: (item) => {
+              const request = item as PurchaseRequest;
+              const canApprove = canApproveCurrentStage(request, currentUser?.email, currentUser?.role);
+              if (String(request.status) !== "Submitted") return <span className="text-slate-500">Approved</span>;
+              return (
+                <Button disabled={busy || !canApprove} onClick={() => runAction("Approval stage approved", () => api.purchaseRequests.approve(String(request.id), true, `Approved ${request.currentApprovalStageName ?? "current stage"}.`))}>
+                  Approve Stage
+                </Button>
+              );
+            } }
           ]}
         />
       ) : null}
@@ -524,6 +537,12 @@ function PrDetail({ pr, busy, onSubmit, documentTypes }: { pr: PurchaseRequest; 
             <StatusBadge status={pr.status} />
           </div>
           <p className="text-sm text-slate-700">{pr.justification}</p>
+          {pr.status === "Submitted" ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              Current approval: {pr.currentApprovalStageName ?? "Approval workflow pending"}.
+            </div>
+          ) : null}
+          {pr.approvalStages?.length ? <ApprovalTimeline pr={pr} /> : null}
           <DataTable data={pr.items} columns={[
             { key: "description", label: "Item" },
             { key: "itemCode", label: "Code", render: (item) => String(item.itemCode ?? "-") },
@@ -543,6 +562,59 @@ function PrDetail({ pr, busy, onSubmit, documentTypes }: { pr: PurchaseRequest; 
         lockedReason="PurchaseRequestSubmitted"
         documentTypes={documentTypes}
       />
+    </div>
+  );
+}
+
+function canApproveCurrentStage(pr: PurchaseRequest, email?: string, role?: string) {
+  if (!email || pr.status !== "Submitted") return false;
+  if (role === "SuperAdmin" || role === "TenantAdmin") return true;
+  const currentStage = pr.approvalStages?.find((stage) => stage.status === "Pending" && stage.stageOrder === pr.currentApprovalStageOrder);
+  return Boolean(currentStage?.approvers.some((approver) => approver.approverEmail.toLowerCase() === email.toLowerCase()));
+}
+
+function ApproverList({ pr }: { pr: PurchaseRequest }) {
+  const currentStage = pr.approvalStages?.find((stage) => stage.status === "Pending" && stage.stageOrder === pr.currentApprovalStageOrder);
+  if (!currentStage) {
+    return <span className="text-slate-500">-</span>;
+  }
+
+  return (
+    <div className="flex max-w-xl flex-wrap gap-1">
+      {currentStage.approvers.map((approver) => (
+        <span key={approver.id} className="rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-700">
+          {approver.approverEmail}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ApprovalTimeline({ pr }: { pr: PurchaseRequest }) {
+  const stages = [...(pr.approvalStages ?? [])].sort((a, b) => a.stageOrder - b.stageOrder);
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      {stages.map((stage) => (
+        <div key={stage.id} className="rounded-lg border border-line bg-slate-50 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase text-slate-500">Stage {stage.stageOrder}</p>
+              <h3 className="mt-1 text-sm font-semibold text-ink">{stage.stageName}</h3>
+            </div>
+            <StatusBadge status={stage.status} />
+          </div>
+          <p className="mt-3 text-xs text-slate-500">Any one assigned approver can approve this stage.</p>
+          <div className="mt-3 space-y-2">
+            {stage.approvers.map((approver) => (
+              <div key={approver.id} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate text-slate-700">{approver.approverEmail}</span>
+                <span className={approver.status === "Approved" ? "font-semibold text-brand" : "text-slate-500"}>{approver.status}</span>
+              </div>
+            ))}
+          </div>
+          {stage.actionedByEmail ? <p className="mt-3 text-xs text-slate-500">Actioned by {stage.actionedByEmail}</p> : null}
+        </div>
+      ))}
     </div>
   );
 }

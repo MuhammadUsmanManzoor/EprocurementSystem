@@ -9,6 +9,7 @@ export function saveSession(accessToken: string, user: AuthenticatedUser) {
 }
 
 export function getCurrentUser(): AuthenticatedUser | null {
+  if (typeof window === "undefined") return null;
   const rawUser = localStorage.getItem(userKey);
   return rawUser ? (JSON.parse(rawUser) as AuthenticatedUser) : null;
 }
