@@ -206,6 +206,52 @@ export type RoleAdmin = {
   permissions: RolePermission[];
 };
 
+export type ApprovalMatrixRule = {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+  department?: string | null;
+  costCenter?: string | null;
+  category?: string | null;
+  priority: number;
+  isActive: boolean;
+  stages: ApprovalMatrixStage[];
+};
+
+export type ApprovalMatrixStage = {
+  id: string;
+  tenantId: string;
+  approvalMatrixRuleId: string;
+  stageOrder: number;
+  stageName: string;
+  approvalMode: string;
+  approvers: ApprovalMatrixApprover[];
+};
+
+export type ApprovalMatrixApprover = {
+  id: string;
+  tenantId: string;
+  approvalMatrixStageId: string;
+  approverEmail: string;
+};
+
+export type SaveApprovalMatrixRule = {
+  tenantId: string;
+  name: string;
+  description?: string;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+  department?: string | null;
+  costCenter?: string | null;
+  category?: string | null;
+  priority: number;
+  isActive: boolean;
+  stages: Array<{ stageOrder: number; stageName: string; approverEmails: string[] }>;
+};
+
 export type DocumentVersion = {
   id: string;
   tenantId: string;
@@ -367,6 +413,13 @@ export const api = {
       apiRequest<RoleAdmin>("/roles", { method: "POST", body: JSON.stringify(payload) }),
     update: (id: string, payload: { name: string; description?: string; isActive: boolean; permissions: RolePermission[] }) =>
       apiRequest<RoleAdmin>(`/roles/${id}`, { method: "PUT", body: JSON.stringify(payload) })
+  },
+  approvalMatrix: {
+    list: () => apiRequest<ApprovalMatrixRule[]>("/approval-matrix"),
+    create: (payload: SaveApprovalMatrixRule) =>
+      apiRequest<ApprovalMatrixRule>("/approval-matrix", { method: "POST", body: JSON.stringify(payload) }),
+    update: (id: string, payload: SaveApprovalMatrixRule) =>
+      apiRequest<ApprovalMatrixRule>(`/approval-matrix/${id}`, { method: "PUT", body: JSON.stringify(payload) })
   },
   documents: {
     list: (filters?: { entityName?: string; entityId?: string }) => {

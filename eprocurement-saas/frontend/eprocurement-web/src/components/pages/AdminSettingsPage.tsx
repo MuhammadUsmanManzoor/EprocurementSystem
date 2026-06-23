@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KeyRound, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
-import { api, demoTenantId, RoleAdmin, RolePermission, UserAdmin } from "@/lib/api";
+import { KeyRound, Plus, RefreshCw, ShieldCheck, Workflow, Users } from "lucide-react";
+import { api, ApprovalMatrixRule, demoTenantId, RoleAdmin, RolePermission, SaveApprovalMatrixRule, UserAdmin } from "@/lib/api";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -15,7 +15,7 @@ import { useToast } from "@/components/ui/ToastProvider";
 import { MasterDataPage } from "@/components/pages/MasterDataPage";
 import { cn } from "@/lib/utils";
 
-type Tab = "master-data" | "users" | "roles";
+type Tab = "master-data" | "users" | "roles" | "approval-matrix";
 
 const permissionActions: Array<{ key: keyof RolePermission; label: string }> = [
   { key: "canView", label: "View" },
@@ -40,10 +40,12 @@ export function AdminSettingsPage() {
       <div className="flex flex-wrap gap-2">
         <TabButton active={tab === "master-data"} onClick={() => setTab("master-data")}>Master Data</TabButton>
         <TabButton active={tab === "users"} onClick={() => setTab("users")}>Users</TabButton>
+        <TabButton active={tab === "approval-matrix"} onClick={() => setTab("approval-matrix")}>Approval Matrix</TabButton>
         <TabButton active={tab === "roles"} onClick={() => setTab("roles")}>Roles & Permissions</TabButton>
       </div>
       {tab === "master-data" ? <MasterDataPage /> : null}
       {tab === "users" ? <UsersPanel /> : null}
+      {tab === "approval-matrix" ? <ApprovalMatrixPanel /> : null}
       {tab === "roles" ? <RolesPanel /> : null}
     </div>
   );
@@ -162,6 +164,270 @@ function UsersPanel() {
           { key: "id", label: "Actions", render: (item) => <div className="flex gap-2"><Button className="h-8 px-3" variant="secondary" onClick={() => editUser(item as UserAdmin)}>Edit</Button><Button className="h-8 px-3" variant="secondary" onClick={() => toggleUser(item as UserAdmin)}>{item.isActive ? "Deactivate" : "Activate"}</Button></div> }
         ]} />
       )}
+    </div>
+  );
+}
+
+type MatrixDraftStage = {
+  stageOrder: number;
+  stageName: string;
+  approversText: string;
+};
+
+type MatrixDraft = {
+  id?: string;
+  name: string;
+  description: string;
+  minAmount: string;
+  maxAmount: string;
+  department: string;
+  costCenter: string;
+  category: string;
+  priority: string;
+  isActive: boolean;
+  stages: MatrixDraftStage[];
+};
+
+const emptyMatrixDraft: MatrixDraft = {
+  name: "",
+  description: "",
+  minAmount: "",
+  maxAmount: "",
+  department: "",
+  costCenter: "",
+  category: "",
+  priority: "100",
+  isActive: true,
+  stages: [
+    { stageOrder: 1, stageName: "Stage 1 - Department Approval", approversText: "approver@akpk.com" },
+    { stageOrder: 2, stageName: "Stage 2 - Finance Review", approversText: "finance@akpk.com, procurement@akpk.com" }
+  ]
+};
+
+function ApprovalMatrixPanel() {
+  const [rules, setRules] = useState<ApprovalMatrixRule[]>([]);
+  const [users, setUsers] = useState<UserAdmin[]>([]);
+  const [draft, setDraft] = useState<MatrixDraft>(emptyMatrixDraft);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const { showToast } = useToast();
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const [nextRules, nextUsers] = await Promise.all([api.approvalMatrix.list(), api.users.list()]);
+      setRules(nextRules);
+      setUsers(nextUsers.filter((user) => user.isActive));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load approval matrix.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  function editRule(rule: ApprovalMatrixRule) {
+    setDraft({
+      id: rule.id,
+      name: rule.name,
+      description: rule.description ?? "",
+      minAmount: rule.minAmount == null ? "" : String(rule.minAmount),
+      maxAmount: rule.maxAmount == null ? "" : String(rule.maxAmount),
+      department: rule.department ?? "",
+      costCenter: rule.costCenter ?? "",
+      category: rule.category ?? "",
+      priority: String(rule.priority),
+      isActive: rule.isActive,
+      stages: [...rule.stages]
+        .sort((a, b) => a.stageOrder - b.stageOrder)
+        .map((stage) => ({
+          stageOrder: stage.stageOrder,
+          stageName: stage.stageName,
+          approversText: stage.approvers.map((approver) => approver.approverEmail).join(", ")
+        }))
+    });
+  }
+
+  function resetDraft() {
+    setDraft({ ...emptyMatrixDraft, stages: emptyMatrixDraft.stages.map((stage) => ({ ...stage })) });
+  }
+
+  function updateStage(index: number, patch: Partial<MatrixDraftStage>) {
+    setDraft({
+      ...draft,
+      stages: draft.stages.map((stage, stageIndex) => stageIndex === index ? { ...stage, ...patch } : stage)
+    });
+  }
+
+  function addStage() {
+    const nextOrder = Math.max(0, ...draft.stages.map((stage) => stage.stageOrder)) + 1;
+    setDraft({
+      ...draft,
+      stages: [...draft.stages, { stageOrder: nextOrder, stageName: `Stage ${nextOrder}`, approversText: "" }]
+    });
+  }
+
+  function removeStage(index: number) {
+    setDraft({ ...draft, stages: draft.stages.filter((_, stageIndex) => stageIndex !== index) });
+  }
+
+  function toPayload(): SaveApprovalMatrixRule | null {
+    if (!draft.name.trim()) {
+      setError("Rule name is required.");
+      return null;
+    }
+
+    const stages = draft.stages
+      .map((stage) => ({
+        stageOrder: Number(stage.stageOrder),
+        stageName: stage.stageName.trim(),
+        approverEmails: stage.approversText.split(",").map((email) => email.trim()).filter(Boolean)
+      }))
+      .filter((stage) => stage.stageName);
+
+    if (!stages.length || stages.some((stage) => !stage.approverEmails.length)) {
+      setError("Each approval stage must have a name and at least one approver.");
+      return null;
+    }
+
+    return {
+      tenantId: demoTenantId,
+      name: draft.name.trim(),
+      description: draft.description.trim() || undefined,
+      minAmount: draft.minAmount ? Number(draft.minAmount) : null,
+      maxAmount: draft.maxAmount ? Number(draft.maxAmount) : null,
+      department: draft.department.trim() || null,
+      costCenter: draft.costCenter.trim() || null,
+      category: draft.category.trim() || null,
+      priority: Number(draft.priority || 100),
+      isActive: draft.isActive,
+      stages
+    };
+  }
+
+  async function saveRule() {
+    const payload = toPayload();
+    if (!payload) return;
+
+    setBusy(true);
+    setError("");
+    try {
+      if (draft.id) {
+        await api.approvalMatrix.update(draft.id, payload);
+        showToast("Approval matrix updated");
+      } else {
+        await api.approvalMatrix.create(payload);
+        showToast("Approval matrix created");
+      }
+      resetDraft();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save approval matrix.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        title="Approval Matrix"
+        description="Configure vertical approval stages and horizontal approvers by amount, department, cost center, and category."
+        action={<Button variant="secondary" onClick={load} disabled={loading || busy}><RefreshCw size={16} /> Refresh</Button>}
+      />
+      {error ? <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+
+      <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
+        <Card className="h-fit">
+          <CardHeader><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Workflow size={16} /> {draft.id ? "Edit Matrix Rule" : "Add Matrix Rule"}</h2></CardHeader>
+          <CardBody className="space-y-3">
+            <Input placeholder="Rule name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+            <Textarea placeholder="Description" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input type="number" placeholder="Min amount" value={draft.minAmount} onChange={(event) => setDraft({ ...draft, minAmount: event.target.value })} />
+              <Input type="number" placeholder="Max amount" value={draft.maxAmount} onChange={(event) => setDraft({ ...draft, maxAmount: event.target.value })} />
+              <Input placeholder="Department" value={draft.department} onChange={(event) => setDraft({ ...draft, department: event.target.value })} />
+              <Input placeholder="Cost center" value={draft.costCenter} onChange={(event) => setDraft({ ...draft, costCenter: event.target.value })} />
+              <Input placeholder="Category" value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })} />
+              <Input type="number" placeholder="Priority" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value })} />
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input type="checkbox" checked={draft.isActive} onChange={() => setDraft({ ...draft, isActive: !draft.isActive })} />
+              Active rule
+            </label>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-ink">Stages</h3>
+                <Button className="h-8 px-3" variant="secondary" onClick={addStage}><Plus size={14} /> Stage</Button>
+              </div>
+              {draft.stages.map((stage, index) => (
+                <div key={index} className="space-y-2 rounded-md border border-line bg-slate-50 p-3">
+                  <div className="grid gap-2 sm:grid-cols-[80px_1fr_auto]">
+                    <Input type="number" value={stage.stageOrder} onChange={(event) => updateStage(index, { stageOrder: Number(event.target.value) })} />
+                    <Input placeholder="Stage name" value={stage.stageName} onChange={(event) => updateStage(index, { stageName: event.target.value })} />
+                    <Button className="h-10 px-3" variant="secondary" onClick={() => removeStage(index)}>Remove</Button>
+                  </div>
+                  <Textarea
+                    placeholder="Approver emails, comma separated"
+                    value={stage.approversText}
+                    onChange={(event) => updateStage(index, { approversText: event.target.value })}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-md border border-line bg-white p-3 text-xs text-slate-600">
+              Active approvers available: {users.map((user) => user.email).join(", ") || "No users loaded"}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={busy} onClick={saveRule}><ShieldCheck size={16} /> {draft.id ? "Save Rule" : "Create Rule"}</Button>
+              <Button variant="secondary" disabled={busy} onClick={resetDraft}>New Rule</Button>
+            </div>
+          </CardBody>
+        </Card>
+
+        <div className="space-y-4">
+          {loading ? <div className="rounded-lg border border-line bg-white p-6 text-sm text-slate-500">Loading approval matrix...</div> : null}
+          {!loading && rules.map((rule) => (
+            <Card key={rule.id}>
+              <CardHeader className="flex flex-row items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-ink">{rule.name}</h2>
+                  <p className="mt-1 text-xs text-slate-500">{rule.description || "No description"}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={rule.isActive ? "green" : "slate"}>{rule.isActive ? "Active" : "Inactive"}</Badge>
+                  <Button className="h-8 px-3" variant="secondary" onClick={() => editRule(rule)}>Edit</Button>
+                </div>
+              </CardHeader>
+              <CardBody className="space-y-3">
+                <div className="grid gap-2 text-xs text-slate-600 md:grid-cols-5">
+                  <span>Amount: {rule.minAmount ?? "Any"} - {rule.maxAmount ?? "Any"}</span>
+                  <span>Department: {rule.department || "Any"}</span>
+                  <span>Cost Center: {rule.costCenter || "Any"}</span>
+                  <span>Category: {rule.category || "Any"}</span>
+                  <span>Priority: {rule.priority}</span>
+                </div>
+                <div className="space-y-2">
+                  {[...rule.stages].sort((a, b) => a.stageOrder - b.stageOrder).map((stage) => (
+                    <div key={stage.id} className="rounded-md border border-line bg-slate-50 p-3">
+                      <div className="text-sm font-medium text-ink">{stage.stageOrder}. {stage.stageName}</div>
+                      <div className="mt-1 text-xs text-slate-600">Any one can approve: {stage.approvers.map((approver) => approver.approverEmail).join(", ")}</div>
+                    </div>
+                  ))}
+                </div>
+              </CardBody>
+            </Card>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

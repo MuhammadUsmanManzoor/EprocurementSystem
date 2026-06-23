@@ -32,6 +32,7 @@ app.UseAuthorization();
 app.MapGet("/health", () => Results.Ok(new { status = "ok", service = "procurement-service" }));
 
 var group = app.MapGroup("/api/purchase-requests").RequireAuthorization();
+var matrixGroup = app.MapGroup("/api/approval-matrix").RequireAuthorization();
 
 group.MapGet("/", async (ProcurementDbContext db, HttpContext http) =>
 {
@@ -106,6 +107,7 @@ group.MapPost("/{id:guid}/submit", async (Guid id, ProcurementDbContext db, IHtt
 {
     var user = new CurrentUser(http.User);
     var pr = await db.PurchaseRequests
+        .Include(x => x.Items)
         .Include(x => x.ApprovalStages)
         .ThenInclude(stage => stage.Approvers)
         .SingleOrDefaultAsync(x => x.Id == id);
@@ -199,6 +201,87 @@ group.MapPost("/{id:guid}/approve", async (Guid id, ApprovePurchaseRequest reque
     return Results.Ok(pr);
 });
 
+matrixGroup.MapGet("/", async (ProcurementDbContext db, HttpContext http) =>
+{
+    var user = new CurrentUser(http.User);
+    var query = db.ApprovalMatrixRules
+        .Include(rule => rule.Stages.OrderBy(stage => stage.StageOrder))
+        .ThenInclude(stage => stage.Approvers)
+        .AsQueryable();
+
+    if (!user.IsSuperAdmin)
+    {
+        query = query.Where(rule => rule.TenantId == user.RequireTenantId());
+    }
+
+    return Results.Ok(await query.OrderBy(rule => rule.Priority).ThenBy(rule => rule.Name).ToListAsync());
+});
+
+matrixGroup.MapPost("/", async (SaveApprovalMatrixRule request, ProcurementDbContext db, IHttpClientFactory httpClientFactory, HttpContext http) =>
+{
+    var user = new CurrentUser(http.User);
+    if (!user.IsSuperAdmin && !user.IsTenantAdmin) return Results.Forbid();
+
+    var tenantId = user.IsSuperAdmin ? request.TenantId : user.RequireTenantId();
+    var validation = ValidateApprovalMatrixRequest(request, tenantId);
+    if (validation is not null) return Results.BadRequest(validation);
+
+    var rule = new ApprovalMatrixRule
+    {
+        TenantId = tenantId,
+        Name = request.Name.Trim(),
+        Description = request.Description?.Trim(),
+        MinAmount = request.MinAmount,
+        MaxAmount = request.MaxAmount,
+        Department = NormalizeOptional(request.Department),
+        CostCenter = NormalizeOptional(request.CostCenter),
+        Category = NormalizeOptional(request.Category),
+        Priority = request.Priority,
+        IsActive = request.IsActive,
+        Stages = BuildMatrixStages(tenantId, request.Stages)
+    };
+
+    db.ApprovalMatrixRules.Add(rule);
+    await db.SaveChangesAsync();
+    await AuditAsync(httpClientFactory, tenantId, "ApprovalMatrixCreated", "ApprovalMatrixRule", rule.Id, user.Email, rule.Name);
+    return Results.Created($"/api/approval-matrix/{rule.Id}", rule);
+});
+
+matrixGroup.MapPut("/{id:guid}", async (Guid id, SaveApprovalMatrixRule request, ProcurementDbContext db, IHttpClientFactory httpClientFactory, HttpContext http) =>
+{
+    var user = new CurrentUser(http.User);
+    if (!user.IsSuperAdmin && !user.IsTenantAdmin) return Results.Forbid();
+
+    var rule = await db.ApprovalMatrixRules
+        .Include(item => item.Stages)
+        .ThenInclude(stage => stage.Approvers)
+        .SingleOrDefaultAsync(item => item.Id == id);
+    if (rule is null) return Results.NotFound();
+    if (!user.CanAccessTenant(rule.TenantId)) return Results.Forbid();
+
+    var validation = ValidateApprovalMatrixRequest(request, rule.TenantId);
+    if (validation is not null) return Results.BadRequest(validation);
+
+    db.ApprovalMatrixStageApprovers.RemoveRange(rule.Stages.SelectMany(stage => stage.Approvers));
+    db.ApprovalMatrixStages.RemoveRange(rule.Stages);
+
+    rule.Name = request.Name.Trim();
+    rule.Description = request.Description?.Trim();
+    rule.MinAmount = request.MinAmount;
+    rule.MaxAmount = request.MaxAmount;
+    rule.Department = NormalizeOptional(request.Department);
+    rule.CostCenter = NormalizeOptional(request.CostCenter);
+    rule.Category = NormalizeOptional(request.Category);
+    rule.Priority = request.Priority;
+    rule.IsActive = request.IsActive;
+    rule.UpdatedAtUtc = DateTime.UtcNow;
+    rule.Stages = BuildMatrixStages(rule.TenantId, request.Stages);
+
+    await db.SaveChangesAsync();
+    await AuditAsync(httpClientFactory, rule.TenantId, "ApprovalMatrixUpdated", "ApprovalMatrixRule", rule.Id, user.Email, rule.Name);
+    return Results.Ok(rule);
+});
+
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<ProcurementDbContext>();
@@ -224,19 +307,21 @@ static async Task<int> GetNextDocEntryAsync(ProcurementDbContext db, Guid tenant
 
 static string BuildDocNum(int docEntry) => $"PR-{DateTime.UtcNow:yyyy}-{docEntry:000000}";
 
-static Task EnsureApprovalWorkflowAsync(ProcurementDbContext db, PurchaseRequest pr)
+static async Task EnsureApprovalWorkflowAsync(ProcurementDbContext db, PurchaseRequest pr)
 {
     if (pr.ApprovalStages.Any())
     {
-        return Task.CompletedTask;
+        return;
     }
 
-    var stages = new[]
-    {
-        CreateApprovalStage(pr, 1, "Stage 1 - Department Approval", new[] { "approver@akpk.com" }),
-        CreateApprovalStage(pr, 2, "Stage 2 - Finance and Procurement Review", new[] { "finance@akpk.com", "procurement@akpk.com", "tenantadmin@akpk.com" }),
-        CreateApprovalStage(pr, 3, "Stage 3 - Final Approval", new[] { "tenantadmin@akpk.com", "approver@akpk.com" })
-    };
+    var prAmount = pr.Items.Sum(item => item.Quantity * item.EstimatedUnitPrice);
+    var rule = await FindApprovalMatrixRuleAsync(db, pr, prAmount);
+    var stages = rule is null
+        ? BuildDefaultApprovalStages(pr)
+        : rule.Stages
+            .OrderBy(stage => stage.StageOrder)
+            .Select(stage => CreateApprovalStage(pr, stage.StageOrder, stage.StageName, stage.Approvers.Select(approver => approver.ApproverEmail)))
+            .ToArray();
 
     foreach (var stage in stages)
     {
@@ -249,7 +334,50 @@ static Task EnsureApprovalWorkflowAsync(ProcurementDbContext db, PurchaseRequest
     }
 
     SetCurrentApprovalStage(pr);
-    return Task.CompletedTask;
+}
+
+static PurchaseRequestApprovalStage[] BuildDefaultApprovalStages(PurchaseRequest pr) =>
+new[]
+{
+    CreateApprovalStage(pr, 1, "Stage 1 - Department Approval", new[] { "approver@akpk.com" }),
+    CreateApprovalStage(pr, 2, "Stage 2 - Finance and Procurement Review", new[] { "finance@akpk.com", "procurement@akpk.com", "tenantadmin@akpk.com" }),
+    CreateApprovalStage(pr, 3, "Stage 3 - Final Approval", new[] { "tenantadmin@akpk.com", "approver@akpk.com" })
+};
+
+static async Task<ApprovalMatrixRule?> FindApprovalMatrixRuleAsync(ProcurementDbContext db, PurchaseRequest pr, decimal amount)
+{
+    var rules = await db.ApprovalMatrixRules
+        .Include(rule => rule.Stages.OrderBy(stage => stage.StageOrder))
+        .ThenInclude(stage => stage.Approvers)
+        .Where(rule => rule.TenantId == pr.TenantId && rule.IsActive)
+        .ToListAsync();
+
+    return rules
+        .Where(rule =>
+            (!rule.MinAmount.HasValue || amount >= rule.MinAmount.Value) &&
+            (!rule.MaxAmount.HasValue || amount <= rule.MaxAmount.Value) &&
+            Matches(rule.Department, pr.Department) &&
+            Matches(rule.CostCenter, pr.CostCenter) &&
+            Matches(rule.Category, pr.Category) &&
+            rule.Stages.Any(stage => stage.Approvers.Any()))
+        .OrderBy(rule => rule.Priority)
+        .ThenByDescending(GetRuleSpecificity)
+        .ThenBy(rule => rule.CreatedAtUtc)
+        .FirstOrDefault();
+}
+
+static bool Matches(string? ruleValue, string? recordValue) =>
+    string.IsNullOrWhiteSpace(ruleValue) || string.Equals(ruleValue.Trim(), recordValue?.Trim(), StringComparison.OrdinalIgnoreCase);
+
+static int GetRuleSpecificity(ApprovalMatrixRule rule)
+{
+    var score = 0;
+    if (rule.MinAmount.HasValue) score++;
+    if (rule.MaxAmount.HasValue) score++;
+    if (!string.IsNullOrWhiteSpace(rule.Department)) score++;
+    if (!string.IsNullOrWhiteSpace(rule.CostCenter)) score++;
+    if (!string.IsNullOrWhiteSpace(rule.Category)) score++;
+    return score;
 }
 
 static PurchaseRequestApprovalStage CreateApprovalStage(PurchaseRequest pr, int stageOrder, string stageName, IEnumerable<string> approverEmails)
@@ -341,6 +469,54 @@ static async Task EnsureSchemaAsync(ProcurementDbContext db)
         """);
 
     await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "ApprovalMatrixRules" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "Name" character varying(160) NOT NULL,
+            "Description" character varying(500) NULL,
+            "MinAmount" numeric(18,2) NULL,
+            "MaxAmount" numeric(18,2) NULL,
+            "Department" character varying(120) NULL,
+            "CostCenter" character varying(120) NULL,
+            "Category" character varying(120) NULL,
+            "Priority" integer NOT NULL,
+            "IsActive" boolean NOT NULL,
+            "CreatedAtUtc" timestamp with time zone NOT NULL,
+            "UpdatedAtUtc" timestamp with time zone NULL,
+            CONSTRAINT "PK_ApprovalMatrixRules" PRIMARY KEY ("Id")
+        );
+
+        CREATE TABLE IF NOT EXISTS "ApprovalMatrixStages" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "ApprovalMatrixRuleId" uuid NOT NULL,
+            "StageOrder" integer NOT NULL,
+            "StageName" character varying(160) NOT NULL,
+            "ApprovalMode" character varying(32) NOT NULL,
+            "CreatedAtUtc" timestamp with time zone NOT NULL,
+            "UpdatedAtUtc" timestamp with time zone NULL,
+            CONSTRAINT "PK_ApprovalMatrixStages" PRIMARY KEY ("Id")
+        );
+
+        CREATE TABLE IF NOT EXISTS "ApprovalMatrixStageApprovers" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "ApprovalMatrixStageId" uuid NOT NULL,
+            "ApproverEmail" character varying(180) NOT NULL,
+            "CreatedAtUtc" timestamp with time zone NOT NULL,
+            "UpdatedAtUtc" timestamp with time zone NULL,
+            CONSTRAINT "PK_ApprovalMatrixStageApprovers" PRIMARY KEY ("Id")
+        );
+
+        CREATE INDEX IF NOT EXISTS "IX_ApprovalMatrixRules_TenantId_IsActive"
+            ON "ApprovalMatrixRules" ("TenantId", "IsActive");
+        CREATE INDEX IF NOT EXISTS "IX_ApprovalMatrixStages_ApprovalMatrixRuleId_StageOrder"
+            ON "ApprovalMatrixStages" ("ApprovalMatrixRuleId", "StageOrder");
+        CREATE INDEX IF NOT EXISTS "IX_ApprovalMatrixStageApprovers_ApprovalMatrixStageId"
+            ON "ApprovalMatrixStageApprovers" ("ApprovalMatrixStageId");
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
         WITH numbered AS (
             SELECT "Id", ROW_NUMBER() OVER (PARTITION BY "TenantId" ORDER BY "CreatedAtUtc", "Id")::integer AS rn
             FROM "PurchaseRequests"
@@ -358,6 +534,8 @@ static async Task EnsureSchemaAsync(ProcurementDbContext db)
 
 static async Task SeedDemoDataAsync(ProcurementDbContext db)
 {
+    await SeedApprovalMatrixAsync(db);
+
     if (await db.PurchaseRequests.AnyAsync(pr => pr.Id == DemoDataIds.ApprovedPurchaseRequestId))
     {
         return;
@@ -397,6 +575,88 @@ static async Task SeedDemoDataAsync(ProcurementDbContext db)
 
     await db.SaveChangesAsync();
 }
+
+static async Task SeedApprovalMatrixAsync(ProcurementDbContext db)
+{
+    if (await db.ApprovalMatrixRules.AnyAsync(rule => rule.TenantId == DemoDataIds.TenantId))
+    {
+        return;
+    }
+
+    db.ApprovalMatrixRules.Add(new ApprovalMatrixRule
+    {
+        TenantId = DemoDataIds.TenantId,
+        Name = "Standard PR Approval",
+        Description = "Default approval matrix when no more specific amount, department, cost center, or category rule applies.",
+        Priority = 100,
+        IsActive = true,
+        Stages = new List<ApprovalMatrixStage>
+        {
+            CreateMatrixStage(DemoDataIds.TenantId, 1, "Stage 1 - Department Approval", new[] { "approver@akpk.com" }),
+            CreateMatrixStage(DemoDataIds.TenantId, 2, "Stage 2 - Finance and Procurement Review", new[] { "finance@akpk.com", "procurement@akpk.com", "tenantadmin@akpk.com" }),
+            CreateMatrixStage(DemoDataIds.TenantId, 3, "Stage 3 - Final Approval", new[] { "tenantadmin@akpk.com", "approver@akpk.com" })
+        }
+    });
+
+    db.ApprovalMatrixRules.Add(new ApprovalMatrixRule
+    {
+        TenantId = DemoDataIds.TenantId,
+        Name = "High Value IT PR Approval",
+        Description = "Specific matrix for IT category purchase requests at or above 50000.",
+        MinAmount = 50000,
+        Category = "CAT-IT",
+        Priority = 10,
+        IsActive = true,
+        Stages = new List<ApprovalMatrixStage>
+        {
+            CreateMatrixStage(DemoDataIds.TenantId, 1, "Stage 1 - IT Department Approval", new[] { "approver@akpk.com" }),
+            CreateMatrixStage(DemoDataIds.TenantId, 2, "Stage 2 - Finance Review", new[] { "finance@akpk.com" }),
+            CreateMatrixStage(DemoDataIds.TenantId, 3, "Stage 3 - Procurement Review", new[] { "procurement@akpk.com", "tenantadmin@akpk.com" }),
+            CreateMatrixStage(DemoDataIds.TenantId, 4, "Stage 4 - Final Approval", new[] { "tenantadmin@akpk.com" })
+        }
+    });
+
+    await db.SaveChangesAsync();
+}
+
+static ApprovalMatrixStage CreateMatrixStage(Guid tenantId, int stageOrder, string stageName, IEnumerable<string> approverEmails)
+{
+    var stage = new ApprovalMatrixStage
+    {
+        TenantId = tenantId,
+        StageOrder = stageOrder,
+        StageName = stageName,
+        ApprovalMode = ApprovalStageMode.AnyOne
+    };
+    stage.Approvers = approverEmails.Select(email => new ApprovalMatrixStageApprover
+    {
+        TenantId = tenantId,
+        ApproverEmail = email
+    }).ToList();
+    return stage;
+}
+
+static List<ApprovalMatrixStage> BuildMatrixStages(Guid tenantId, List<SaveApprovalMatrixStage> stages) =>
+    stages
+        .OrderBy(stage => stage.StageOrder)
+        .Select(stage => CreateMatrixStage(tenantId, stage.StageOrder, stage.StageName.Trim(), stage.ApproverEmails.Select(email => email.Trim()).Where(email => !string.IsNullOrWhiteSpace(email)).Distinct(StringComparer.OrdinalIgnoreCase)))
+        .ToList();
+
+static string? ValidateApprovalMatrixRequest(SaveApprovalMatrixRule request, Guid tenantId)
+{
+    if (tenantId == Guid.Empty) return "TenantId is required.";
+    if (string.IsNullOrWhiteSpace(request.Name)) return "Rule name is required.";
+    if (request.MinAmount.HasValue && request.MinAmount.Value < 0) return "Minimum amount cannot be negative.";
+    if (request.MaxAmount.HasValue && request.MaxAmount.Value < 0) return "Maximum amount cannot be negative.";
+    if (request.MinAmount.HasValue && request.MaxAmount.HasValue && request.MinAmount.Value > request.MaxAmount.Value) return "Minimum amount cannot be greater than maximum amount.";
+    if (request.Stages.Count == 0) return "At least one approval stage is required.";
+    if (request.Stages.Any(stage => stage.StageOrder <= 0 || string.IsNullOrWhiteSpace(stage.StageName))) return "Each stage must have a positive order and name.";
+    if (request.Stages.Select(stage => stage.StageOrder).Distinct().Count() != request.Stages.Count) return "Stage order values must be unique.";
+    if (request.Stages.Any(stage => stage.ApproverEmails.Count == 0 || stage.ApproverEmails.All(string.IsNullOrWhiteSpace))) return "Each stage must have at least one approver.";
+    return null;
+}
+
+static string? NormalizeOptional(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
 public sealed class PurchaseRequest : TenantEntity
 {
@@ -458,9 +718,40 @@ public enum ApprovalStageMode { AnyOne }
 public enum ApprovalStageStatus { Pending, Approved, Rejected }
 public enum ApprovalApproverStatus { Pending, Approved, Rejected }
 
+public sealed class ApprovalMatrixRule : TenantEntity
+{
+    public string Name { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public decimal? MinAmount { get; set; }
+    public decimal? MaxAmount { get; set; }
+    public string? Department { get; set; }
+    public string? CostCenter { get; set; }
+    public string? Category { get; set; }
+    public int Priority { get; set; } = 100;
+    public bool IsActive { get; set; } = true;
+    public List<ApprovalMatrixStage> Stages { get; set; } = new();
+}
+
+public sealed class ApprovalMatrixStage : TenantEntity
+{
+    public Guid ApprovalMatrixRuleId { get; set; }
+    public int StageOrder { get; set; }
+    public string StageName { get; set; } = string.Empty;
+    public ApprovalStageMode ApprovalMode { get; set; } = ApprovalStageMode.AnyOne;
+    public List<ApprovalMatrixStageApprover> Approvers { get; set; } = new();
+}
+
+public sealed class ApprovalMatrixStageApprover : TenantEntity
+{
+    public Guid ApprovalMatrixStageId { get; set; }
+    public string ApproverEmail { get; set; } = string.Empty;
+}
+
 public sealed record CreatePurchaseRequest(Guid TenantId, string Title, string Department, string? CostCenter, string? Category, string? Currency, string Justification, List<CreatePurchaseRequestItem> Items);
 public sealed record CreatePurchaseRequestItem(string? ItemCode, string Description, string? UnitOfMeasure, decimal Quantity, decimal EstimatedUnitPrice);
 public sealed record ApprovePurchaseRequest(bool Approved, string Remarks);
+public sealed record SaveApprovalMatrixRule(Guid TenantId, string Name, string? Description, decimal? MinAmount, decimal? MaxAmount, string? Department, string? CostCenter, string? Category, int Priority, bool IsActive, List<SaveApprovalMatrixStage> Stages);
+public sealed record SaveApprovalMatrixStage(int StageOrder, string StageName, List<string> ApproverEmails);
 
 public sealed class ProcurementDbContext : DbContext
 {
@@ -469,6 +760,9 @@ public sealed class ProcurementDbContext : DbContext
     public DbSet<PurchaseRequestItem> PurchaseRequestItems => Set<PurchaseRequestItem>();
     public DbSet<PurchaseRequestApprovalStage> PurchaseRequestApprovalStages => Set<PurchaseRequestApprovalStage>();
     public DbSet<PurchaseRequestApprovalStageApprover> PurchaseRequestApprovalStageApprovers => Set<PurchaseRequestApprovalStageApprover>();
+    public DbSet<ApprovalMatrixRule> ApprovalMatrixRules => Set<ApprovalMatrixRule>();
+    public DbSet<ApprovalMatrixStage> ApprovalMatrixStages => Set<ApprovalMatrixStage>();
+    public DbSet<ApprovalMatrixStageApprover> ApprovalMatrixStageApprovers => Set<ApprovalMatrixStageApprover>();
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<PurchaseRequest>(entity =>
@@ -514,6 +808,33 @@ public sealed class ProcurementDbContext : DbContext
             entity.Property(approver => approver.ApproverEmail).HasMaxLength(180).IsRequired();
             entity.Property(approver => approver.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(approver => approver.Remarks).HasMaxLength(500);
+        });
+        modelBuilder.Entity<ApprovalMatrixRule>(entity =>
+        {
+            entity.HasKey(rule => rule.Id);
+            entity.HasIndex(rule => new { rule.TenantId, rule.IsActive });
+            entity.Property(rule => rule.Name).HasMaxLength(160).IsRequired();
+            entity.Property(rule => rule.Description).HasMaxLength(500);
+            entity.Property(rule => rule.MinAmount).HasPrecision(18, 2);
+            entity.Property(rule => rule.MaxAmount).HasPrecision(18, 2);
+            entity.Property(rule => rule.Department).HasMaxLength(120);
+            entity.Property(rule => rule.CostCenter).HasMaxLength(120);
+            entity.Property(rule => rule.Category).HasMaxLength(120);
+            entity.HasMany(rule => rule.Stages).WithOne().HasForeignKey(stage => stage.ApprovalMatrixRuleId);
+        });
+        modelBuilder.Entity<ApprovalMatrixStage>(entity =>
+        {
+            entity.HasKey(stage => stage.Id);
+            entity.HasIndex(stage => new { stage.ApprovalMatrixRuleId, stage.StageOrder });
+            entity.Property(stage => stage.StageName).HasMaxLength(160).IsRequired();
+            entity.Property(stage => stage.ApprovalMode).HasConversion<string>().HasMaxLength(32);
+            entity.HasMany(stage => stage.Approvers).WithOne().HasForeignKey(approver => approver.ApprovalMatrixStageId);
+        });
+        modelBuilder.Entity<ApprovalMatrixStageApprover>(entity =>
+        {
+            entity.HasKey(approver => approver.Id);
+            entity.HasIndex(approver => approver.ApprovalMatrixStageId);
+            entity.Property(approver => approver.ApproverEmail).HasMaxLength(180).IsRequired();
         });
     }
 }
