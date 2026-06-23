@@ -18,20 +18,25 @@ public static class AuthDbSeeder
         var passwordHash = hasher.Hash("Password123!");
         var users = new[]
         {
-            new AppUser { TenantId = null, Email = "superadmin@demo.com", FullName = "Super Admin", Role = "SuperAdmin", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "tenantadmin@akpk.com", FullName = "AKPK Tenant Admin", Role = "TenantAdmin", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "procurement@akpk.com", FullName = "Procurement Officer", Role = "Procurement", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "approver@akpk.com", FullName = "Approval Manager", Role = "Approver", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "committee@akpk.com", FullName = "Evaluation Committee", Role = "Committee", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "finance@akpk.com", FullName = "Finance Officer", Role = "Finance", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "vendor@demo.com", FullName = "Demo Vendor", Role = "Vendor", PasswordHash = passwordHash },
-            new AppUser { TenantId = AkpkTenantId, Email = "auditor@akpk.com", FullName = "Audit Reviewer", Role = "Auditor", PasswordHash = passwordHash }
+            new AppUser { TenantId = null, Username = "superadmin", Email = "superadmin@demo.com", FullName = "Super Admin", Role = "SuperAdmin", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "tenantadmin", Email = "tenantadmin@akpk.com", FullName = "AKPK Tenant Admin", Role = "TenantAdmin", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "procurement", Email = "procurement@akpk.com", FullName = "Procurement Officer", Role = "Procurement", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "approver", Email = "approver@akpk.com", FullName = "Approval Manager", Role = "Approver", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "committee", Email = "committee@akpk.com", FullName = "Evaluation Committee", Role = "Committee", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "finance", Email = "finance@akpk.com", FullName = "Finance Officer", Role = "Finance", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "vendor", Email = "vendor@demo.com", FullName = "Demo Vendor", Role = "Vendor", PasswordHash = passwordHash },
+            new AppUser { TenantId = AkpkTenantId, Username = "auditor", Email = "auditor@akpk.com", FullName = "Audit Reviewer", Role = "Auditor", PasswordHash = passwordHash }
         };
 
         foreach (var user in users)
         {
-            if (await db.Users.AnyAsync(item => item.Email == user.Email))
+            var existing = await db.Users.SingleOrDefaultAsync(item => item.Email == user.Email);
+            if (existing is not null)
             {
+                existing.Username = user.Username;
+                existing.FullName = user.FullName;
+                existing.Role = user.Role;
+                existing.TenantId = user.TenantId;
                 continue;
             }
 
@@ -83,6 +88,14 @@ public static class AuthDbSeeder
             CREATE UNIQUE INDEX IF NOT EXISTS "IX_Roles_TenantId_Code" ON auth."Roles" ("TenantId", "Code");
             CREATE UNIQUE INDEX IF NOT EXISTS "IX_RolePermissions_RoleId_Module_Scenario" ON auth."RolePermissions" ("RoleId", "Module", "Scenario");
             CREATE INDEX IF NOT EXISTS "IX_RolePermissions_RoleId" ON auth."RolePermissions" ("RoleId");
+            """);
+
+        await db.Database.ExecuteSqlRawAsync("""
+            ALTER TABLE auth."Users" ADD COLUMN IF NOT EXISTS "Username" character varying(80) NOT NULL DEFAULT '';
+            UPDATE auth."Users"
+            SET "Username" = lower(split_part("Email", '@', 1))
+            WHERE "Username" = '';
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_Users_Username" ON auth."Users" ("Username");
             """);
     }
 

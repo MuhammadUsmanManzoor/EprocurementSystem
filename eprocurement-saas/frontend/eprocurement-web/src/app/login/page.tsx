@@ -1,14 +1,14 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { Building2, LockKeyhole, Mail, ShieldCheck } from "lucide-react";
+import { Building2, LockKeyhole, ShieldCheck, UserRound } from "lucide-react";
 import { login } from "@/lib/api";
 import { saveSession } from "@/lib/session";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("tenantadmin@akpk.com");
+  const [usernameOrEmail, setUsernameOrEmail] = useState("tenantadmin");
   const [password, setPassword] = useState("Password123!");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -17,8 +17,8 @@ export default function LoginPage() {
     event.preventDefault();
     setError("");
 
-    if (!email.includes("@")) {
-      setError("Enter a valid business email address.");
+    if (!usernameOrEmail.trim()) {
+      setError("Enter your username.");
       return;
     }
     if (password.length < 8) {
@@ -28,7 +28,7 @@ export default function LoginPage() {
 
     setIsSubmitting(true);
     try {
-      const result = await login(email, password);
+      const result = await login(usernameOrEmail, password);
       saveSession(result.accessToken, result.user);
       window.location.assign("/dashboard");
     } catch (err) {
@@ -69,10 +69,10 @@ export default function LoginPage() {
             </div>
           </div>
 
-          <label className="mb-2 block text-sm font-medium text-slate-700" htmlFor="email">Email</label>
+          <label className="mb-2 block text-sm font-medium text-slate-700" htmlFor="username">Username</label>
           <div className="mb-5 flex items-center gap-2 rounded-md border border-line bg-white px-3 focus-within:border-brand focus-within:ring-2 focus-within:ring-teal-100">
-            <Mail size={18} className="text-slate-500" />
-            <Input id="email" className="border-0 px-0 focus:ring-0" value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
+            <UserRound size={18} className="text-slate-500" />
+            <Input id="username" className="border-0 px-0 focus:ring-0" value={usernameOrEmail} onChange={(event) => setUsernameOrEmail(event.target.value)} type="text" autoComplete="username" required />
           </div>
 
           <label className="mb-2 block text-sm font-medium text-slate-700" htmlFor="password">Password</label>
@@ -86,7 +86,7 @@ export default function LoginPage() {
           <Button className="mt-6 w-full" disabled={isSubmitting} type="submit">
             {isSubmitting ? "Signing in" : "Sign in"}
           </Button>
-          <p className="mt-5 text-center text-xs text-slate-500">Demo password: Password123!</p>
+          <p className="mt-5 text-center text-xs text-slate-500">Try username tenantadmin. Demo password: Password123!</p>
         </form>
       </section>
     </main>

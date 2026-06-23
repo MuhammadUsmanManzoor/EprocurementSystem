@@ -5,6 +5,7 @@ public sealed record LoginRequest(string Email, string Password);
 public sealed record AuthenticatedUserDto(
     Guid Id,
     Guid? TenantId,
+    string Username,
     string Email,
     string FullName,
     string Role);

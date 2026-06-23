@@ -53,7 +53,7 @@ export function AppTopbar({ user, onMenu }: { user: AuthenticatedUser | null; on
             <div className="absolute right-0 mt-2 w-64 rounded-lg border border-line bg-white p-3 shadow-lg">
               <div className="border-b border-line pb-3">
                 <p className="truncate text-sm font-semibold text-ink">{user?.fullName}</p>
-                <p className="mt-1 truncate text-xs text-slate-500">{user?.email}</p>
+                <p className="mt-1 truncate text-xs text-slate-500">@{user?.username} · {user?.email}</p>
               </div>
               <Button className="mt-3 w-full justify-start" variant="ghost" onClick={signOut}>
                 <LogOut size={16} />

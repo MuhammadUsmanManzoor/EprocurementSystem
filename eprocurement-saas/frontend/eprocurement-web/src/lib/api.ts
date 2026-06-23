@@ -6,6 +6,7 @@ export const demoTenderId = "33333333-3333-3333-3333-333333333333";
 export type AuthenticatedUser = {
   id: string;
   tenantId: string | null;
+  username: string;
   email: string;
   fullName: string;
   role: string;
@@ -168,6 +169,7 @@ export type MasterDataItem = {
 export type UserAdmin = {
   id: string;
   tenantId: string | null;
+  username: string;
   email: string;
   fullName: string;
   role: string;
@@ -251,21 +253,21 @@ export type DocumentVersionFilePayload = {
   virusScanStatus?: string;
 };
 
-export async function login(email: string, password: string): Promise<LoginResponse> {
+export async function login(usernameOrEmail: string, password: string): Promise<LoginResponse> {
   let response: Response;
 
   try {
     response = await fetch(`${apiBaseUrl}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email: usernameOrEmail, password })
     });
   } catch {
     throw new Error("API Gateway is not reachable. Start Docker Compose and try again.");
   }
 
   if (!response.ok) {
-    throw new Error("Invalid email or password.");
+    throw new Error("Invalid username/email or password.");
   }
 
   return response.json();
@@ -354,9 +356,9 @@ export const api = {
   },
   users: {
     list: () => apiRequest<UserAdmin[]>("/users"),
-    create: (payload: { tenantId?: string; email: string; fullName: string; role: string; password?: string }) =>
+    create: (payload: { tenantId?: string; username: string; email: string; fullName: string; role: string; password?: string }) =>
       apiRequest<UserAdmin>("/users", { method: "POST", body: JSON.stringify(payload) }),
-    update: (id: string, payload: { tenantId?: string | null; fullName: string; role: string; isActive: boolean; password?: string }) =>
+    update: (id: string, payload: { tenantId?: string | null; username: string; fullName: string; role: string; isActive: boolean; password?: string }) =>
       apiRequest<UserAdmin>(`/users/${id}`, { method: "PUT", body: JSON.stringify(payload) })
   },
   roles: {

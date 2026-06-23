@@ -65,7 +65,7 @@ function UsersPanel() {
   const [users, setUsers] = useState<UserAdmin[]>([]);
   const [roles, setRoles] = useState<RoleAdmin[]>([]);
   const [selected, setSelected] = useState<UserAdmin | null>(null);
-  const [form, setForm] = useState({ email: "", fullName: "", role: "", password: "" });
+  const [form, setForm] = useState({ username: "", email: "", fullName: "", role: "", password: "" });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -92,12 +92,12 @@ function UsersPanel() {
 
   function editUser(user: UserAdmin) {
     setSelected(user);
-    setForm({ email: user.email, fullName: user.fullName, role: user.role, password: "" });
+    setForm({ username: user.username, email: user.email, fullName: user.fullName, role: user.role, password: "" });
   }
 
   async function saveUser() {
-    if (!form.fullName.trim() || !form.role || (!selected && !form.email.trim())) {
-      setError("Email, full name, and role are required.");
+    if (!form.username.trim() || !form.fullName.trim() || !form.role || (!selected && !form.email.trim())) {
+      setError("Username, email, full name, and role are required.");
       return;
     }
 
@@ -105,14 +105,14 @@ function UsersPanel() {
     setError("");
     try {
       if (selected) {
-        await api.users.update(selected.id, { tenantId: selected.tenantId ?? demoTenantId, fullName: form.fullName, role: form.role, isActive: selected.isActive, password: form.password || undefined });
+        await api.users.update(selected.id, { tenantId: selected.tenantId ?? demoTenantId, username: form.username, fullName: form.fullName, role: form.role, isActive: selected.isActive, password: form.password || undefined });
         showToast("User updated");
       } else {
-        await api.users.create({ tenantId: demoTenantId, email: form.email, fullName: form.fullName, role: form.role, password: form.password || "Password123!" });
+        await api.users.create({ tenantId: demoTenantId, username: form.username, email: form.email, fullName: form.fullName, role: form.role, password: form.password || "Password123!" });
         showToast("User created");
       }
       setSelected(null);
-      setForm({ email: "", fullName: "", role: roles[0]?.code ?? "", password: "" });
+      setForm({ username: "", email: "", fullName: "", role: roles[0]?.code ?? "", password: "" });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save user.");
@@ -125,7 +125,7 @@ function UsersPanel() {
     setBusy(true);
     setError("");
     try {
-      await api.users.update(user.id, { tenantId: user.tenantId ?? demoTenantId, fullName: user.fullName, role: user.role, isActive: !user.isActive });
+      await api.users.update(user.id, { tenantId: user.tenantId ?? demoTenantId, username: user.username, fullName: user.fullName, role: user.role, isActive: !user.isActive });
       showToast(user.isActive ? "User deactivated" : "User activated");
       await load();
     } catch (err) {
@@ -141,7 +141,8 @@ function UsersPanel() {
       {error ? <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
       <Card>
         <CardHeader><h2 className="flex items-center gap-2 text-sm font-semibold text-ink"><Users size={16} /> {selected ? "Edit User" : "Add User"}</h2></CardHeader>
-        <CardBody className="grid gap-3 lg:grid-cols-[1fr_1fr_180px_180px_auto]">
+        <CardBody className="grid gap-3 lg:grid-cols-[160px_1fr_1fr_180px_180px_auto]">
+          <Input placeholder="Username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
           <Input placeholder="Email" disabled={Boolean(selected)} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} />
           <Input placeholder="Full name" value={form.fullName} onChange={(event) => setForm({ ...form, fullName: event.target.value })} />
           <Select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}>
@@ -153,6 +154,7 @@ function UsersPanel() {
       </Card>
       {loading ? <div className="rounded-lg border border-line bg-white p-6 text-sm text-slate-500">Loading users...</div> : (
         <DataTable data={users} columns={[
+          { key: "username", label: "Username" },
           { key: "email", label: "Email" },
           { key: "fullName", label: "Full Name" },
           { key: "role", label: "Role" },

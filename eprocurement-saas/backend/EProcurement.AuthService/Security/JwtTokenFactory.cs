@@ -26,6 +26,7 @@ public sealed class JwtTokenFactory
         {
             new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new(JwtRegisteredClaimNames.Email, user.Email),
+            new("username", user.Username),
             new(ClaimTypes.Name, user.FullName),
             new(ClaimTypes.Role, user.Role)
         };

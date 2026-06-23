@@ -49,14 +49,15 @@ app.MapPost("/api/auth/login", async (
     PasswordHasher passwordHasher,
     JwtTokenFactory tokenFactory) =>
 {
-    var user = await db.Users.SingleOrDefaultAsync(item => item.Email == request.Email.ToLower());
+    var login = request.Email.Trim().ToLowerInvariant();
+    var user = await db.Users.SingleOrDefaultAsync(item => item.Username == login || item.Email == login);
     if (user is null || !user.IsActive || !passwordHasher.Verify(request.Password, user.PasswordHash))
     {
         return Results.Unauthorized();
     }
 
     var token = tokenFactory.Create(user);
-    var dto = new AuthenticatedUserDto(user.Id, user.TenantId, user.Email, user.FullName, user.Role);
+    var dto = new AuthenticatedUserDto(user.Id, user.TenantId, user.Username, user.Email, user.FullName, user.Role);
     return Results.Ok(new LoginResponse(token, dto));
 });
 
@@ -75,7 +76,7 @@ users.MapGet("/", async (AuthDbContext db, HttpContext http) =>
 
     var rows = await query
         .OrderBy(item => item.FullName)
-        .Select(item => new UserAdminDto(item.Id, item.TenantId, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc))
+        .Select(item => new UserAdminDto(item.Id, item.TenantId, item.Username, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc))
         .ToListAsync();
     return Results.Ok(rows);
 });
@@ -91,12 +92,15 @@ users.MapPost("/", async (CreateUserRequest request, AuthDbContext db, PasswordH
     if (role.Code != "SuperAdmin" && tenantId is null) return Results.BadRequest("TenantId is required for tenant users.");
     var targetTenantId = tenantId.GetValueOrDefault();
 
+    var username = request.Username.Trim().ToLowerInvariant();
     var email = request.Email.Trim().ToLowerInvariant();
+    if (await db.Users.AnyAsync(item => item.Username == username)) return Results.BadRequest("Username already exists.");
     if (await db.Users.AnyAsync(item => item.Email == email)) return Results.BadRequest("Email already exists.");
 
     var item = new AppUser
     {
         TenantId = role.Code == "SuperAdmin" ? null : targetTenantId,
+        Username = username,
         Email = email,
         FullName = request.FullName.Trim(),
         Role = role.Code,
@@ -106,7 +110,7 @@ users.MapPost("/", async (CreateUserRequest request, AuthDbContext db, PasswordH
 
     db.Users.Add(item);
     await db.SaveChangesAsync();
-    return Results.Created($"/api/users/{item.Id}", new UserAdminDto(item.Id, item.TenantId, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc));
+    return Results.Created($"/api/users/{item.Id}", new UserAdminDto(item.Id, item.TenantId, item.Username, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc));
 });
 
 users.MapPut("/{id:guid}", async (Guid id, UpdateUserRequest request, AuthDbContext db, PasswordHasher hasher, HttpContext http) =>
@@ -124,6 +128,10 @@ users.MapPut("/{id:guid}", async (Guid id, UpdateUserRequest request, AuthDbCont
     if (role.Code != "SuperAdmin" && tenantId is null) return Results.BadRequest("TenantId is required for tenant users.");
     var targetTenantId = tenantId.GetValueOrDefault();
 
+    var username = request.Username.Trim().ToLowerInvariant();
+    if (await db.Users.AnyAsync(other => other.Id != id && other.Username == username)) return Results.BadRequest("Username already exists.");
+
+    item.Username = username;
     item.FullName = request.FullName.Trim();
     item.Role = role.Code;
     item.TenantId = role.Code == "SuperAdmin" ? null : targetTenantId;
@@ -135,7 +143,7 @@ users.MapPut("/{id:guid}", async (Guid id, UpdateUserRequest request, AuthDbCont
     }
 
     await db.SaveChangesAsync();
-    return Results.Ok(new UserAdminDto(item.Id, item.TenantId, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc));
+    return Results.Ok(new UserAdminDto(item.Id, item.TenantId, item.Username, item.Email, item.FullName, item.Role, item.IsActive, item.CreatedAtUtc));
 });
 
 var roles = app.MapGroup("/api/roles").RequireAuthorization();
@@ -280,9 +288,9 @@ static void ApplyPermission(RolePermission permission, RolePermissionDto dto)
     permission.UpdatedAtUtc = DateTime.UtcNow;
 }
 
-public sealed record UserAdminDto(Guid Id, Guid? TenantId, string Email, string FullName, string Role, bool IsActive, DateTime CreatedAtUtc);
-public sealed record CreateUserRequest(Guid? TenantId, string Email, string FullName, string Role, string? Password);
-public sealed record UpdateUserRequest(Guid? TenantId, string FullName, string Role, bool IsActive, string? Password);
+public sealed record UserAdminDto(Guid Id, Guid? TenantId, string Username, string Email, string FullName, string Role, bool IsActive, DateTime CreatedAtUtc);
+public sealed record CreateUserRequest(Guid? TenantId, string Username, string Email, string FullName, string Role, string? Password);
+public sealed record UpdateUserRequest(Guid? TenantId, string Username, string FullName, string Role, bool IsActive, string? Password);
 public sealed record RoleAdminDto(Guid Id, Guid? TenantId, string Code, string Name, string Description, bool IsSystem, bool IsActive, List<RolePermissionDto> Permissions);
 public sealed record CreateRoleRequest(Guid? TenantId, string Code, string Name, string? Description, List<RolePermissionDto> Permissions);
 public sealed record UpdateRoleRequest(string Name, string? Description, bool IsActive, List<RolePermissionDto> Permissions);
