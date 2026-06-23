@@ -171,7 +171,7 @@ function UsersPanel() {
 type MatrixDraftStage = {
   stageOrder: number;
   stageName: string;
-  approversText: string;
+  approverEmails: string[];
 };
 
 type MatrixDraft = {
@@ -199,8 +199,8 @@ const emptyMatrixDraft: MatrixDraft = {
   priority: "100",
   isActive: true,
   stages: [
-    { stageOrder: 1, stageName: "Stage 1 - Department Approval", approversText: "approver@akpk.com" },
-    { stageOrder: 2, stageName: "Stage 2 - Finance Review", approversText: "finance@akpk.com, procurement@akpk.com" }
+    { stageOrder: 1, stageName: "Stage 1 - Department Approval", approverEmails: ["approver@akpk.com"] },
+    { stageOrder: 2, stageName: "Stage 2 - Finance Review", approverEmails: ["finance@akpk.com", "procurement@akpk.com"] }
   ]
 };
 
@@ -248,7 +248,7 @@ function ApprovalMatrixPanel() {
         .map((stage) => ({
           stageOrder: stage.stageOrder,
           stageName: stage.stageName,
-          approversText: stage.approvers.map((approver) => approver.approverEmail).join(", ")
+          approverEmails: stage.approvers.map((approver) => approver.approverEmail)
         }))
     });
   }
@@ -268,12 +268,21 @@ function ApprovalMatrixPanel() {
     const nextOrder = Math.max(0, ...draft.stages.map((stage) => stage.stageOrder)) + 1;
     setDraft({
       ...draft,
-      stages: [...draft.stages, { stageOrder: nextOrder, stageName: `Stage ${nextOrder}`, approversText: "" }]
+      stages: [...draft.stages, { stageOrder: nextOrder, stageName: `Stage ${nextOrder}`, approverEmails: [] }]
     });
   }
 
   function removeStage(index: number) {
     setDraft({ ...draft, stages: draft.stages.filter((_, stageIndex) => stageIndex !== index) });
+  }
+
+  function toggleStageApprover(stageIndex: number, email: string) {
+    const stage = draft.stages[stageIndex];
+    if (!stage) return;
+    const nextEmails = stage.approverEmails.includes(email)
+      ? stage.approverEmails.filter((item) => item !== email)
+      : [...stage.approverEmails, email];
+    updateStage(stageIndex, { approverEmails: nextEmails });
   }
 
   function toPayload(): SaveApprovalMatrixRule | null {
@@ -286,7 +295,7 @@ function ApprovalMatrixPanel() {
       .map((stage) => ({
         stageOrder: Number(stage.stageOrder),
         stageName: stage.stageName.trim(),
-        approverEmails: stage.approversText.split(",").map((email) => email.trim()).filter(Boolean)
+        approverEmails: stage.approverEmails
       }))
       .filter((stage) => stage.stageName);
 
@@ -373,17 +382,37 @@ function ApprovalMatrixPanel() {
                     <Input placeholder="Stage name" value={stage.stageName} onChange={(event) => updateStage(index, { stageName: event.target.value })} />
                     <Button className="h-10 px-3" variant="secondary" onClick={() => removeStage(index)}>Remove</Button>
                   </div>
-                  <Textarea
-                    placeholder="Approver emails, comma separated"
-                    value={stage.approversText}
-                    onChange={(event) => updateStage(index, { approversText: event.target.value })}
-                  />
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold uppercase text-slate-500">Select approvers. Any one selected user can approve this stage.</div>
+                    <div className="grid max-h-56 gap-2 overflow-y-auto rounded-md border border-line bg-white p-2">
+                      {users.length ? users.map((user) => (
+                        <label key={user.id} className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 hover:bg-slate-50">
+                          <input
+                            className="mt-1"
+                            type="checkbox"
+                            checked={stage.approverEmails.includes(user.email)}
+                            onChange={() => toggleStageApprover(index, user.email)}
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-sm font-medium text-ink">{user.fullName}</span>
+                            <span className="block truncate text-xs text-slate-500">{user.username} · {user.role} · {user.email}</span>
+                          </span>
+                        </label>
+                      )) : <div className="px-2 py-3 text-sm text-slate-500">No active users found.</div>}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {stage.approverEmails.map((email) => {
+                        const selectedUser = users.find((user) => user.email === email);
+                        return <Badge key={email} tone="slate">{selectedUser?.username ?? email}</Badge>;
+                      })}
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
 
             <div className="rounded-md border border-line bg-white p-3 text-xs text-slate-600">
-              Active approvers available: {users.map((user) => user.email).join(", ") || "No users loaded"}
+              Approvers come from User Master Data. Add or activate users in the Users tab before assigning them to an approval stage.
             </div>
 
             <div className="flex flex-wrap gap-2">
