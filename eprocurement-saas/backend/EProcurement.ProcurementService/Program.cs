@@ -252,18 +252,27 @@ matrixGroup.MapPut("/{id:guid}", async (Guid id, SaveApprovalMatrixRule request,
     var user = new CurrentUser(http.User);
     if (!user.IsSuperAdmin && !user.IsTenantAdmin) return Results.Forbid();
 
-    var rule = await db.ApprovalMatrixRules
-        .Include(item => item.Stages)
-        .ThenInclude(stage => stage.Approvers)
-        .SingleOrDefaultAsync(item => item.Id == id);
+    var rule = await db.ApprovalMatrixRules.SingleOrDefaultAsync(item => item.Id == id);
     if (rule is null) return Results.NotFound();
     if (!user.CanAccessTenant(rule.TenantId)) return Results.Forbid();
 
     var validation = ValidateApprovalMatrixRequest(request, rule.TenantId);
     if (validation is not null) return Results.BadRequest(validation);
 
-    db.ApprovalMatrixStageApprovers.RemoveRange(rule.Stages.SelectMany(stage => stage.Approvers));
-    db.ApprovalMatrixStages.RemoveRange(rule.Stages);
+    var existingStageIds = await db.ApprovalMatrixStages
+        .Where(stage => stage.ApprovalMatrixRuleId == rule.Id)
+        .Select(stage => stage.Id)
+        .ToListAsync();
+
+    if (existingStageIds.Count > 0)
+    {
+        await db.ApprovalMatrixStageApprovers
+            .Where(approver => existingStageIds.Contains(approver.ApprovalMatrixStageId))
+            .ExecuteDeleteAsync();
+        await db.ApprovalMatrixStages
+            .Where(stage => stage.ApprovalMatrixRuleId == rule.Id)
+            .ExecuteDeleteAsync();
+    }
 
     rule.Name = request.Name.Trim();
     rule.Description = request.Description?.Trim();
@@ -275,11 +284,20 @@ matrixGroup.MapPut("/{id:guid}", async (Guid id, SaveApprovalMatrixRule request,
     rule.Priority = request.Priority;
     rule.IsActive = request.IsActive;
     rule.UpdatedAtUtc = DateTime.UtcNow;
-    rule.Stages = BuildMatrixStages(rule.TenantId, request.Stages);
+    var newStages = BuildMatrixStages(rule.TenantId, request.Stages);
+    foreach (var stage in newStages)
+    {
+        stage.ApprovalMatrixRuleId = rule.Id;
+    }
+    db.ApprovalMatrixStages.AddRange(newStages);
 
     await db.SaveChangesAsync();
     await AuditAsync(httpClientFactory, rule.TenantId, "ApprovalMatrixUpdated", "ApprovalMatrixRule", rule.Id, user.Email, rule.Name);
-    return Results.Ok(rule);
+    var updatedRule = await db.ApprovalMatrixRules
+        .Include(item => item.Stages.OrderBy(stage => stage.StageOrder))
+        .ThenInclude(stage => stage.Approvers)
+        .SingleAsync(item => item.Id == rule.Id);
+    return Results.Ok(updatedRule);
 });
 
 using (var scope = app.Services.CreateScope())
