@@ -242,6 +242,7 @@ services:
       Jwt__Issuer: ${JWT_ISSUER:-eprocurement}
       Jwt__Audience: ${JWT_AUDIENCE:-eprocurement-web}
       Jwt__Secret: ${JWT_SECRET:-development-secret-change-me-development-secret}
+      ConnectionStrings__SapCompany: Server=${SAP_SQL_HOST:-host.docker.internal},${SAP_SQL_PORT:-1433};Database=${SAP_COMPANY_DATABASE:-TargetCompany1};User Id=${SAP_SQL_USER:-sa};Password=${SAP_SQL_PASSWORD:-};Encrypt=False;TrustServerCertificate=True
     ports:
       - "5111:8080"
 
