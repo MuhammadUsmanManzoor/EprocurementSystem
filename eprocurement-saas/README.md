@@ -2,6 +2,8 @@
 
 SaaS-based E-Procurement and Tender Management System foundation.
 
+Project status: active MVP build and local Docker Compose testing.
+
 ## Current Scope
 
 - Next.js, React, TypeScript, and Tailwind CSS frontend
